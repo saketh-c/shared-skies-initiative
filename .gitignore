@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+/frontend/node_modules
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build outputs
+/frontend/dist
+/backend/__pycache__
+*.egg-info/
+dist/
+
+# Environment
+.env
+.env.local
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+*.joblib
+*.pkl
+models/
+
+# Data cache
+.cache/
+*.parquet

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useEffect, useState, forwardRef } from "react";
+import { useMemo, useRef, useEffect, useState, forwardRef, useCallback } from "react";
 import { MapContainer, TileLayer, GeoJSON, useMap, Circle } from "react-leaflet";
 import { BREAKPOINTS } from "../utils/aqi.js";
 
@@ -129,7 +129,7 @@ const MapViewContent = forwardRef(
       };
     };
 
-    const onEachFeature = (feature, layer) => {
+    const onEachFeature = useCallback((feature, layer) => {
       const geoid = normGeoid(feature.properties?.GEOID);
       const pred = predMap[geoid];
       const name = feature.properties?.NAME ?? geoid;
@@ -164,7 +164,7 @@ const MapViewContent = forwardRef(
           e.target.setStyle(styleFeature(feature));
         },
       });
-    };
+    }, [predMap, selectedGeoid, onTractSelect]);
 
     const hasPolygons = geojson?.features?.length > 0 && geojson.features[0]?.geometry;
 
@@ -176,6 +176,9 @@ const MapViewContent = forwardRef(
         zoomControl={true}
         zoomSnap={0}
         preferCanvas={true}
+        maxBounds={[[25.5, -106.6], [36.5, -93.5]]}
+        maxZoom={13}
+        minZoom={4}
       >
         <TileLayer url={CARTO_LIGHT_NOLABELS} attribution={ATTRIBUTION} zIndex={1} keepBuffer={8} />
 

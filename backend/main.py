@@ -7,6 +7,7 @@ Start with:
 (run from the project root)
 """
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -67,17 +68,17 @@ state: dict = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load model
+    # Load model in a thread so the event loop stays responsive
     if os.path.exists(MODEL_PATH):
-        state["bundle"] = joblib.load(MODEL_PATH)
+        state["bundle"] = await asyncio.to_thread(joblib.load, MODEL_PATH)
         print(f"Model loaded. Features: {state['bundle']['feature_names']}")
     else:
         state["bundle"] = None
         print("WARNING: models/ensemble.joblib not found. Run pipeline/02_train_model.py")
 
-    # Load tract lookup
+    # Load tract lookup in a thread
     if os.path.exists(LOOKUP_PATH):
-        df = pd.read_parquet(LOOKUP_PATH)
+        df = await asyncio.to_thread(pd.read_parquet, LOOKUP_PATH)
         df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
         state["tract_lookup"] = df
         print(f"Tract lookup loaded: {len(df)} total tracts")

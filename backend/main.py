@@ -96,6 +96,25 @@ async def lifespan(app: FastAPI):
     # Statewide cache
     state["cache_texas"] = {"data": None, "expires": datetime.min.replace(tzinfo=timezone.utc)}
 
+    # Kick off background precompute to warm the Texas predictions cache so
+    # initial requests from the frontend don't time out when computing all tracts.
+    async def _precompute_texas():
+        try:
+            print("Background: precomputing Texas predictions...")
+            # Call the texas_predictions endpoint implementation directly
+            # but run in background to avoid blocking startup.
+            await texas_predictions()
+            print("Background: Texas precompute complete.")
+        except Exception as e:
+            print(f"Background Texas precompute failed: {e}")
+
+    # Schedule background precompute (do not await)
+    try:
+        asyncio.create_task(_precompute_texas())
+    except Exception:
+        # In some environments create_task must be called differently; ignore failures
+        pass
+
     yield
 
 

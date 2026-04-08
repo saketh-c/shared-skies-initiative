@@ -1,38 +1,12 @@
-# Dependencies
 node_modules/
-/frontend/node_modules
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Build outputs
-/frontend/dist
-/backend/__pycache__
-*.egg-info/
-dist/
-
-# Environment
+*.pyc
+*.pyo
+*.bak
+*.bak2
 .env
-.env.local
-.venv
-venv/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Models (large files)
-*.joblib
-*.pkl
-models/
-
-# Data cache
-.cache/
-*.parquet
+dist/
+build/
+.vite/
+backend/static/state_*_tracts.geojson
+backend/static/us_all_tracts.geojson

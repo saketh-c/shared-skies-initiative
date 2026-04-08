@@ -1,11 +1,10 @@
-import { useMemo, useRef, useEffect, useState, forwardRef, useImperativeHandle } from "react";
-import { MapContainer, TileLayer, GeoJSON, useMap } from "react-leaflet";
+import { useMemo, useRef, useEffect, useState, forwardRef } from "react";
+import { MapContainer, TileLayer, GeoJSON, useMap, Circle } from "react-leaflet";
 import { BREAKPOINTS } from "../utils/aqi.js";
-import L from "leaflet";
 
-const CARTO_DARK_NOLABELS =
+const CARTO_LIGHT_NOLABELS =
   "https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png";
-const CARTO_LABELS =
+const CARTO_LIGHT_LABELS =
   "https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png";
 const ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/">CARTO</a>';
@@ -18,19 +17,63 @@ function normGeoid(val) {
   return String(val).padStart(11, "0");
 }
 
-// ── Zoom controller ───────────────────────────────────────────────────────
-function MapZoomController({ mapRef }) {
+function FlyToHandler({ target }) {
   const map = useMap();
-  useImperativeHandle(mapRef, () => ({
-    zoom: (lat, lon) => {
-      map.flyTo([lat, lon], 13, { duration: 1.5, easeLinearity: 0.25 });
-    },
-  }));
+  useEffect(() => {
+    if (target && !isNaN(target.lat) && !isNaN(target.lon)) {
+      map.flyTo([target.lat, target.lon], 13, { duration: 1.8, easeLinearity: 0.2 });
+    }
+  }, [target]);
+  return null;
+}
+
+function SmoothWheelZoom() {
+  const map = useMap();
+  useEffect(() => {
+    map.scrollWheelZoom.disable();
+
+    let accDelta = 0;
+    let lastMousePoint = null;
+    let lastMouseLatLng = null;
+    let timer = null;
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      accDelta += e.deltaY < 0 ? 0.5 : -0.5;
+      lastMousePoint = map.mouseEventToContainerPoint(e);
+      lastMouseLatLng = map.containerPointToLatLng(lastMousePoint);
+
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        const newZoom = Math.max(1, Math.min(18, map.getZoom() + accDelta));
+        const mouseNewPx = map.project(lastMouseLatLng, newZoom);
+        const newCenterPx = mouseNewPx
+          .subtract(lastMousePoint)
+          .add(map.getSize().divideBy(2));
+        const newCenter = map.unproject(newCenterPx, newZoom);
+
+        map.flyTo(newCenter, newZoom, {
+          animate: true,
+          duration: 0.6,
+          easeLinearity: 0.15,
+        });
+
+        accDelta = 0;
+        timer = null;
+      }, 40);
+    };
+
+    map.getContainer().addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      map.getContainer().removeEventListener("wheel", onWheel);
+      if (timer) clearTimeout(timer);
+    };
+  }, [map]);
   return null;
 }
 
 const MapViewContent = forwardRef(
-  ({ geojson, predictions, onTractSelect, selectedGeoid, statewide }, mapRef) => {
+  ({ geojson, predictions, onTractSelect, selectedGeoid, searchMarker, statewide }, _ref) => {
     const [mapKey, setMapKey] = useState(0);
     const prevPredLen = useRef(0);
 
@@ -49,7 +92,6 @@ const MapViewContent = forwardRef(
       return m;
     }, [predictions]);
 
-    // ── GeoJSON polygon styling ────────────────────────────────────────────
     const styleFeature = (feature) => {
       const geoid = normGeoid(feature.properties?.GEOID);
       const pred = predMap[geoid];
@@ -57,7 +99,6 @@ const MapViewContent = forwardRef(
       return {
         fillColor: pred ? pred.color : "#2d3436",
         fillOpacity: isSelected ? 0.95 : 0.80,
-        // USE FILL COLOR as border to eliminate black gaps between tracts
         color: isSelected ? "#ffffff" : (pred ? pred.color : "rgba(0,0,0,0.08)"),
         weight: isSelected ? 2.5 : 1.0,
         lineCap: "round",
@@ -69,10 +110,7 @@ const MapViewContent = forwardRef(
       const geoid = normGeoid(feature.properties?.GEOID);
       const pred = predMap[geoid];
       const name = feature.properties?.NAME ?? geoid;
-      // Fix: county from backend already has "County" suffix sometimes
       const county = pred?.county ? pred.county.replace(/ County$/i, "") : "";
-
-      // NAME field is like "Census Tract 9501" or just "9501" — normalize
       const displayName = name.startsWith("Census Tract") ? name : `Census Tract ${name}`;
 
       if (pred) {
@@ -109,14 +147,14 @@ const MapViewContent = forwardRef(
         zoom={TEXAS_ZOOM}
         style={{ height: "100%", width: "100%" }}
         zoomControl={true}
+        zoomSnap={0}
         preferCanvas={true}
       >
-        {/* Layer 1: Dark base map without labels */}
-        <TileLayer url={CARTO_DARK_NOLABELS} attribution={ATTRIBUTION} zIndex={1} />
+        <TileLayer url={CARTO_LIGHT_NOLABELS} attribution={ATTRIBUTION} zIndex={1} keepBuffer={8} />
 
-        <MapZoomController mapRef={mapRef} />
+        <FlyToHandler target={searchMarker} />
+        <SmoothWheelZoom />
 
-        {/* Census tract polygons */}
         {hasPolygons && (
           <GeoJSON
             key={`geojson-${mapKey}`}
@@ -126,10 +164,17 @@ const MapViewContent = forwardRef(
           />
         )}
 
-        {/* Layer 4: City labels on TOP */}
-        <TileLayer url={CARTO_LABELS} zIndex={650} pane="shadowPane" />
+        {searchMarker && (
+          <Circle
+            center={[searchMarker.lat, searchMarker.lon]}
+            radius={120}
+            pane="markerPane"
+            pathOptions={{ color: "#fff", weight: 2, fillColor: "#0077b6", fillOpacity: 1 }}
+          />
+        )}
 
-        {/* Legend */}
+        <TileLayer url={CARTO_LIGHT_LABELS} zIndex={650} pane="shadowPane" keepBuffer={8} />
+
         <div className="map-legend">
           <div className="legend-title">PM2.5 µg/m³</div>
           {BREAKPOINTS.map((b) => (
@@ -146,4 +191,4 @@ const MapViewContent = forwardRef(
 
 MapViewContent.displayName = "MapViewContent";
 
-export default forwardRef((props, ref) => <MapViewContent {...props} mapRef={ref} />);
+export default forwardRef((props, ref) => <MapViewContent {...props} />);

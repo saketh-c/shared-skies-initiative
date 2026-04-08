@@ -1,4 +1,4 @@
-/* ── CSS variables ──────────────────────────────────────────────────────── */
+/* ── CSS variables (dark mode) ──────────────────────────────────────────── */
 :root {
   --bg:           #0a0f1e;
   --glass:        rgba(9, 13, 32, 0.92);
@@ -10,6 +10,7 @@
   --text-dim:     rgba(240, 244, 255, 0.3);
   --radius:       14px;
   --sidebar-w:    380px;
+  --accent:       #0077b6;
 }
 
 /* ── Layout ─────────────────────────────────────────────────────────────── */
@@ -136,7 +137,9 @@
   font-weight: 800;
   line-height: 1;
   letter-spacing: -3px;
-  transition: color 0.4s, text-shadow 0.4s;
+  transition: color 0.4s;
+  -webkit-text-stroke: 1px rgba(0,0,0,0.5);
+  text-shadow: none;
 }
 
 .pm25-unit {
@@ -155,6 +158,8 @@
   font-weight: 600;
   width: fit-content;
   transition: background 0.4s, color 0.4s;
+  -webkit-text-stroke: 0.8px rgba(0,0,0,0.5);
+  text-shadow: none;
 }
 
 /* ── Gauge bar ───────────────────────────────────────────────────────────── */
@@ -384,8 +389,8 @@
 .spinner {
   width: 36px;
   height: 36px;
-  border: 3px solid rgba(255,255,255,0.1);
-  border-top-color: #00b4d8;
+  border: 3px solid rgba(0,0,0,0.08);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -417,25 +422,31 @@
 
 /* ── Map overrides ───────────────────────────────────────────────────────── */
 .leaflet-container {
-  background: #0d1526 !important;
+  background: #0a0f1e !important;
 }
 
+.leaflet-interactive:focus {
+  outline: none;
+}
+
+
+
 .leaflet-control-attribution {
-  background: rgba(0,0,0,0.5) !important;
-  color: rgba(255,255,255,0.4) !important;
+  background: rgba(9,13,32,0.85) !important;
+  color: rgba(240,244,255,0.4) !important;
   font-size: 9px !important;
 }
 
-.leaflet-control-attribution a { color: rgba(0,180,216,0.6) !important; }
+.leaflet-control-attribution a { color: var(--accent) !important; }
 
 .leaflet-control-zoom a {
-  background: rgba(9,13,32,0.9) !important;
-  color: rgba(255,255,255,0.7) !important;
+  background: rgba(9,13,32,0.92) !important;
+  color: #f0f4ff !important;
   border-color: rgba(255,255,255,0.1) !important;
 }
 
 .leaflet-control-zoom a:hover {
-  background: rgba(9,13,32,1) !important;
+  background: rgba(255,255,255,0.1) !important;
   color: #fff !important;
 }
 
@@ -447,7 +458,7 @@
   font-family: 'Inter', sans-serif !important;
   font-size: 12px !important;
   padding: 8px 12px !important;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.4) !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
 }
 
 .tract-tooltip::before { display: none; }
@@ -458,7 +469,7 @@
   bottom: 28px;
   right: 16px;
   z-index: 500;
-  background: rgba(9,13,32,0.9);
+  background: rgba(9,13,32,0.92);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 10px;
@@ -466,6 +477,7 @@
   font-size: 11px;
   color: var(--text-muted);
   pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 
 .legend-title {
@@ -491,17 +503,6 @@
   flex-shrink: 0;
 }
 
-/* ── Gradient/glow effect on polygon layer (smooth heatmap transitions) ── */
-
-/* Apply blur to canvas rendering for smooth color blending between tracts */
-.leaflet-overlay-pane canvas {
-  filter: blur(0.8px) drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.4));
-}
-
-/* SVG layer also gets blur for smooth gradients */
-.leaflet-overlay-pane svg {
-  filter: blur(0.8px) drop-shadow(0 0 2px rgba(0, 0, 0, 0.3));
-}
 
 /* City labels layer — make them more visible above polygons */
 .leaflet-shadow-pane {
@@ -532,6 +533,126 @@
   text-align: center;
   padding: 4px 16px;
   font-style: italic;
+}
+
+/* ── Sidebar tabs ────────────────────────────────────────────────────────── */
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-shrink: 0;
+}
+
+.map-search-overlay {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 1000;
+  width: 320px;
+}
+
+.sidebar-tab {
+  flex: 1;
+  padding: 13px 8px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.sidebar-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.sidebar-tab:hover:not(.active) { color: var(--text); }
+
+/* ── Air Quality Guide ───────────────────────────────────────────────────── */
+.guide-content {
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.guide-intro {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.guide-level {
+  border-radius: var(--radius);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+
+.guide-level-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--card);
+}
+
+.guide-level-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.guide-level-name {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.guide-level-range {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.guide-level-body {
+  padding: 12px 16px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.guide-level-who {
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.guide-explainer {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  border: 1px solid var(--glass-border);
+}
+
+.guide-explainer h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0 0 8px;
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */

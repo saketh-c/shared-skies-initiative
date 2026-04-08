@@ -26,7 +26,7 @@ function PM25Hero({ pm25, color, category }) {
         <div className="pm25-label">Current PM2.5</div>
         <div className="pm25-number-row">
           <div className="pm25-number" style={{ color, textShadow: `0 0 40px ${color}55` }}>
-            {fmt(pm25, 1)}
+            {fmt(pm25, 2)}
           </div>
           <div className="pm25-unit">µg/m³</div>
         </div>

@@ -38,7 +38,7 @@ const COLOR_SCALE = {
   hazardousRange: {
     min: 13.0,
     max: Infinity,
-    color: "#8B0000",     // Dark red/maroon
+    color: "#7b2ff7",     // Purple
     category: "Hazardous",
     label: "13+ µg/m³"
   }
@@ -167,7 +167,7 @@ export function getAQIInfo(pm25) {
   return {
     category: COLOR_SCALE.hazardousRange.category,
     color: pm25Color(pm25),
-    bg: "rgba(139, 0, 0, 0.12)",
+    bg: "rgba(123, 47, 247, 0.12)",
     label: COLOR_SCALE.hazardousRange.label,
     aqi_range: "Hazardous",
     health_msg: "⚠️ Air quality is hazardous. Avoid all outdoor activities."
@@ -201,5 +201,5 @@ export const BREAKPOINTS = [
   { max: 3.9,   category: "Good",      color: "#00b894", label: "0–3.9" },
   { max: 8.9,   category: "Moderate",  color: "#FFD700", label: "4–8.9" },
   { max: 12.9,  category: "Unhealthy", color: "#d63031", label: "9–12.9" },
-  { max: Infinity, category: "Hazardous", color: "#8B0000", label: "13+" },
+  { max: Infinity, category: "Hazardous", color: "#7b2ff7", label: "13+" },
 ];

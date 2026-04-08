@@ -66,7 +66,6 @@ export default function SearchBar({ onSearch, loading }) {
       }
 
       onSearch({ lat, lon, address });
-      setSearchInput('');
       setSuggestions([]);
       setShowSuggestions(false);
     } catch (err) {
@@ -85,7 +84,7 @@ export default function SearchBar({ onSearch, loading }) {
     );
   };
 
-  const handleSearch = (e) => {
+  const handleSearch = async (e) => {
     e.preventDefault();
     setError('');
 
@@ -94,11 +93,29 @@ export default function SearchBar({ onSearch, loading }) {
         setError('Please enter an address');
         return;
       }
-      // If suggestions exist, use the first one; otherwise search directly
       if (suggestions.length > 0) {
         handleSuggestionClick(suggestions[0]);
       } else {
-        geocodeAddress(searchInput, parseFloat(searchInput.split(',')[0]), parseFloat(searchInput.split(',')[1]));
+        // No suggestions loaded yet — do a fresh Nominatim lookup
+        setIsSearching(true);
+        try {
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+              searchInput + ', Texas'
+            )}&limit=1`
+          );
+          const results = await response.json();
+          if (results.length > 0) {
+            const r = results[0];
+            geocodeAddress(r.display_name, parseFloat(r.lat), parseFloat(r.lon));
+          } else {
+            setError('Address not found. Try a more specific Texas address.');
+          }
+        } catch (err) {
+          setError('Search failed. Please try again.');
+        } finally {
+          setIsSearching(false);
+        }
       }
     } else {
       // Coordinates mode
@@ -122,7 +139,6 @@ export default function SearchBar({ onSearch, loading }) {
       }
 
       onSearch({ lat, lon });
-      setSearchInput('');
       setError('');
     }
   };
@@ -198,9 +214,7 @@ export default function SearchBar({ onSearch, loading }) {
       </form>
 
       <div className="search-hint">
-        {searchType === 'address'
-          ? 'Enter any Texas address to view your air quality'
-          : 'Enter latitude and longitude separated by comma'}
+        {searchType === 'coordinates' ? 'Enter latitude and longitude separated by comma' : ''}
       </div>
     </div>
   );

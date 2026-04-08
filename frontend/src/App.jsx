@@ -5,6 +5,10 @@ import SearchBar from "./components/SearchBar.jsx";
 import AirQualityGuide from "./components/AirQualityGuide.jsx";
 import { findNearestTract } from "./utils/geo.js";
 
+// API base URL: in production set VITE_API_URL=https://your-backend.onrender.com
+// In dev, leave empty so /api/... uses the Vite proxy to localhost:8000
+const API_BASE = import.meta.env.VITE_API_URL || "";
+
 const REFRESH_MS = 30 * 60 * 1000; // 30 min
 
 export default function App() {
@@ -23,7 +27,7 @@ export default function App() {
   const fetchPredictions = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/texas/predictions");
+      const res = await fetch(`${API_BASE}/api/texas/predictions`);
       if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
       const data = await res.json();
       setPredictions(data);
@@ -39,7 +43,7 @@ export default function App() {
 
   const fetchGeojson = useCallback(async () => {
     try {
-      const res = await fetch("/api/texas/tracts/geojson");
+      const res = await fetch(`${API_BASE}/api/texas/tracts/geojson`);
       if (!res.ok) throw new Error(`GeoJSON error ${res.status}`);
       const data = await res.json();
       if (data.features?.length > 0 && data.features[0].geometry) {
@@ -68,7 +72,7 @@ export default function App() {
 
     setWeatherLoading(true);
     try {
-      const res = await fetch(`/api/tract/${geoid}`);
+      const res = await fetch(`${API_BASE}/api/tract/${geoid}`);
       if (res.ok) {
         const data = await res.json();
         setLocalWeather(data.weather);

@@ -17,29 +17,37 @@ function normGeoid(val) {
   return String(val).padStart(11, "0");
 }
 
+// Fly to a target — only triggers when the target reference changes
 function FlyToHandler({ target }) {
   const map = useMap();
+  const lastTargetRef = useRef(null);
   useEffect(() => {
-    if (target && !isNaN(target.lat) && !isNaN(target.lon)) {
-      map.flyTo([target.lat, target.lon], 13, { duration: 1.8, easeLinearity: 0.2 });
-    }
-  }, [target]);
+    if (!target || isNaN(target.lat) || isNaN(target.lon)) return;
+    // Only fly if target actually changed (compare values, not reference)
+    const last = lastTargetRef.current;
+    if (last && last.lat === target.lat && last.lon === target.lon) return;
+    lastTargetRef.current = { lat: target.lat, lon: target.lon };
+    map.flyTo([target.lat, target.lon], 13, { duration: 1.8, easeLinearity: 0.2 });
+  }, [target, map]);
   return null;
 }
 
-function BackgroundClickHandler({ onBackgroundClick, lastClickedFeature, onResetFeatureClick }) {
+// Map background click handler — uses ref to track polygon clicks synchronously
+function BackgroundClickHandler({ onBackgroundClick, justClickedRef }) {
   const map = useMap();
   useEffect(() => {
     const handleMapClick = () => {
-      if (!lastClickedFeature) {
-        onBackgroundClick?.();
+      // If this click came from a polygon, the polygon's click handler set this ref to true
+      if (justClickedRef.current) {
+        justClickedRef.current = false;
+        return;
       }
-      onResetFeatureClick?.();
+      // True background click — deselect
+      onBackgroundClick?.();
     };
-
     map.on("click", handleMapClick);
     return () => map.off("click", handleMapClick);
-  }, [map, onBackgroundClick, lastClickedFeature, onResetFeatureClick]);
+  }, [map, onBackgroundClick, justClickedRef]);
   return null;
 }
 
@@ -89,11 +97,19 @@ function SmoothWheelZoom() {
 }
 
 const MapViewContent = forwardRef(
-  ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker, statewide }, _ref) => {
+  ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker }, _ref) => {
     const [mapKey, setMapKey] = useState(0);
-    const [lastClickedFeature, setLastClickedFeature] = useState(false);
+    const justClickedRef = useRef(false);
     const prevPredLen = useRef(0);
-    const mapRef = useRef(null);
+
+    // Use refs for callbacks so polygon click handlers always see the LATEST functions
+    // (not stale closures from when the GeoJSON layer was first created)
+    const onTractSelectRef = useRef(onTractSelect);
+    const selectedGeoidRef = useRef(selectedGeoid);
+    const predMapRef = useRef({});
+
+    useEffect(() => { onTractSelectRef.current = onTractSelect; }, [onTractSelect]);
+    useEffect(() => { selectedGeoidRef.current = selectedGeoid; }, [selectedGeoid]);
 
     useEffect(() => {
       if (predictions.length > 0 && prevPredLen.current === 0) {
@@ -110,6 +126,8 @@ const MapViewContent = forwardRef(
       return m;
     }, [predictions]);
 
+    useEffect(() => { predMapRef.current = predMap; }, [predMap]);
+
     const styleFeature = useCallback((feature) => {
       const geoid = normGeoid(feature.properties?.GEOID);
       const pred = predMap[geoid];
@@ -124,9 +142,16 @@ const MapViewContent = forwardRef(
       };
     }, [predMap, selectedGeoid]);
 
+    // onEachFeature is only called ONCE per feature when GeoJSON is created.
+    // We use refs to access latest state inside the handlers.
     const onEachFeature = useCallback((feature, layer) => {
       const geoid = normGeoid(feature.properties?.GEOID);
-      const pred = predMap[geoid];
+
+      // CRITICAL: prevent click events from bubbling to the map's click handler
+      layer.options.bubblingMouseEvents = false;
+
+      // Build tooltip from current predictions
+      const pred = predMapRef.current[geoid];
       const name = feature.properties?.NAME ?? geoid;
       const county = pred?.county ? pred.county.replace(/ County$/i, "") : "";
       const displayName = name.startsWith("Census Tract") ? name : `Census Tract ${name}`;
@@ -142,24 +167,34 @@ const MapViewContent = forwardRef(
       }
 
       layer.on({
-        click: (e) => {
-          setLastClickedFeature(true);
-          onTractSelect(geoid);
-          e.stopPropagation();
+        click: () => {
+          // Mark synchronously so the map background handler knows
+          justClickedRef.current = true;
+          // Use the LATEST callback via ref, not a stale closure
+          onTractSelectRef.current?.(geoid);
         },
         mouseover: (e) => {
+          const isSelected = geoid === selectedGeoidRef.current;
           e.target.setStyle({
-            fillOpacity: 0.9,
-            weight: geoid === selectedGeoid ? 2.5 : 1.5,
-            color: geoid === selectedGeoid ? "#ffffff" : "rgba(255,255,255,0.6)",
+            fillOpacity: 0.92,
+            weight: isSelected ? 2.5 : 1.5,
+            color: isSelected ? "#ffffff" : "rgba(255,255,255,0.6)",
           });
           e.target.bringToFront();
         },
         mouseout: (e) => {
-          e.target.setStyle(styleFeature(feature));
+          // Recompute style with the LATEST predictions and selectedGeoid via refs
+          const currentPred = predMapRef.current[geoid];
+          const isSelected = geoid === selectedGeoidRef.current;
+          e.target.setStyle({
+            fillColor: currentPred ? currentPred.color : "#2d3436",
+            fillOpacity: isSelected ? 0.95 : 0.80,
+            color: isSelected ? "#ffffff" : (currentPred ? currentPred.color : "rgba(0,0,0,0.08)"),
+            weight: isSelected ? 2.5 : 1.0,
+          });
         },
       });
-    }, [predMap, selectedGeoid, onTractSelect]);
+    }, []); // Empty deps — handlers use refs for latest state
 
     const hasPolygons = geojson?.features?.length > 0 && geojson.features[0]?.geometry;
 
@@ -179,10 +214,9 @@ const MapViewContent = forwardRef(
 
         <FlyToHandler target={searchMarker} />
         <SmoothWheelZoom />
-        <BackgroundClickHandler 
+        <BackgroundClickHandler
           onBackgroundClick={onBackgroundClick}
-          lastClickedFeature={lastClickedFeature}
-          onResetFeatureClick={() => setLastClickedFeature(false)}
+          justClickedRef={justClickedRef}
         />
 
         {hasPolygons && (
@@ -198,7 +232,9 @@ const MapViewContent = forwardRef(
           <Circle
             center={[searchMarker.lat, searchMarker.lon]}
             radius={120}
-            pane="markerPane"
+            interactive={false}
+            bubblingMouseEvents={false}
+            className="search-marker-circle"
             pathOptions={{ color: "#fff", weight: 2, fillColor: "#0077b6", fillOpacity: 1 }}
           />
         )}

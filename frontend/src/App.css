@@ -511,6 +511,11 @@
   pointer-events: none;
 }
 
+/* Search marker — must NEVER block clicks/hovers on tracts underneath */
+.search-marker-circle {
+  pointer-events: none !important;
+}
+
 /* Weather loading badge */
 .weather-loading-badge {
   display: inline-block;

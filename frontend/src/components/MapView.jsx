@@ -27,6 +27,21 @@ function FlyToHandler({ target }) {
   return null;
 }
 
+function BackgroundClickHandler({ onBackgroundClick }) {
+  const map = useMap();
+  useEffect(() => {
+    const handleClick = (e) => {
+      // Only trigger if clicking on empty space (not a feature)
+      if (e.target === map.getPane("tilePane") || e.target.tagName === "CANVAS") {
+        onBackgroundClick?.();
+      }
+    };
+    map.on("click", handleClick);
+    return () => map.off("click", handleClick);
+  }, [map, onBackgroundClick]);
+  return null;
+}
+
 function SmoothWheelZoom() {
   const map = useMap();
   useEffect(() => {
@@ -73,7 +88,7 @@ function SmoothWheelZoom() {
 }
 
 const MapViewContent = forwardRef(
-  ({ geojson, predictions, onTractSelect, selectedGeoid, searchMarker, statewide }, _ref) => {
+  ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker, statewide }, _ref) => {
     const [mapKey, setMapKey] = useState(0);
     const prevPredLen = useRef(0);
 
@@ -154,6 +169,7 @@ const MapViewContent = forwardRef(
 
         <FlyToHandler target={searchMarker} />
         <SmoothWheelZoom />
+        <BackgroundClickHandler onBackgroundClick={onBackgroundClick} />
 
         {hasPolygons && (
           <GeoJSON

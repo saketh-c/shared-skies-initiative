@@ -141,6 +141,7 @@ export default function App() {
           geojson={geojson}
           predictions={predictions?.tracts ?? []}
           onTractSelect={handleTractSelect}
+          onBackgroundClick={handleDeselect}
           selectedGeoid={selectedTract?.geoid ?? null}
           searchMarker={searchMarker}
           statewide={true}

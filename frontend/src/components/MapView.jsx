@@ -98,9 +98,7 @@ function SmoothWheelZoom() {
 
 const MapViewContent = forwardRef(
   ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker }, _ref) => {
-    const [mapKey, setMapKey] = useState(0);
     const justClickedRef = useRef(false);
-    const prevPredLen = useRef(0);
 
     // Use refs for callbacks so polygon click handlers always see the LATEST functions
     // (not stale closures from when the GeoJSON layer was first created)
@@ -111,12 +109,6 @@ const MapViewContent = forwardRef(
     useEffect(() => { onTractSelectRef.current = onTractSelect; }, [onTractSelect]);
     useEffect(() => { selectedGeoidRef.current = selectedGeoid; }, [selectedGeoid]);
 
-    useEffect(() => {
-      if (predictions.length > 0 && prevPredLen.current === 0) {
-        setMapKey((k) => k + 1);
-      }
-      prevPredLen.current = predictions.length;
-    }, [predictions.length]);
 
     const predMap = useMemo(() => {
       const m = {};
@@ -198,6 +190,24 @@ const MapViewContent = forwardRef(
 
     const hasPolygons = geojson?.features?.length > 0 && geojson.features[0]?.geometry;
 
+    // StyleUpdater ensures GeoJSON layer styles update in-place without recreating the layer
+    function StyleUpdater() {
+      const map = useMap();
+      useEffect(() => {
+        if (!map) return;
+        map.eachLayer((layer) => {
+          if (layer && layer.feature && typeof layer.setStyle === "function") {
+            try {
+              layer.setStyle(styleFeature(layer.feature));
+            } catch (e) {
+              // ignore layers that don't match
+            }
+          }
+        });
+      }, [predMap, selectedGeoid, map]);
+      return null;
+    }
+
     return (
       <MapContainer
         center={TEXAS_CENTER}
@@ -206,11 +216,12 @@ const MapViewContent = forwardRef(
         zoomControl={true}
         zoomSnap={0}
         preferCanvas={true}
-        maxBounds={[[25.5, -106.6], [36.5, -93.5]]}
+        touchZoom={true}
+        tap={true}
         maxZoom={13}
         minZoom={4}
       >
-        <TileLayer url={CARTO_LIGHT_NOLABELS} attribution={ATTRIBUTION} zIndex={1} keepBuffer={8} />
+        <TileLayer url={CARTO_LIGHT_NOLABELS} attribution={ATTRIBUTION} zIndex={1} keepBuffer={8} updateWhenZooming={false} updateWhenIdle={true} />
 
         <FlyToHandler target={searchMarker} />
         <SmoothWheelZoom />
@@ -219,9 +230,10 @@ const MapViewContent = forwardRef(
           justClickedRef={justClickedRef}
         />
 
+        <StyleUpdater />
+
         {hasPolygons && (
           <GeoJSON
-            key={`geojson-${mapKey}`}
             data={geojson}
             style={styleFeature}
             onEachFeature={onEachFeature}
@@ -239,7 +251,7 @@ const MapViewContent = forwardRef(
           />
         )}
 
-        <TileLayer url={CARTO_LIGHT_LABELS} zIndex={650} pane="shadowPane" keepBuffer={8} />
+        <TileLayer url={CARTO_LIGHT_LABELS} zIndex={650} pane="shadowPane" keepBuffer={8} updateWhenZooming={false} updateWhenIdle={true} />
 
         <div className="map-legend">
           <div className="legend-title">PM2.5 µg/m³</div>

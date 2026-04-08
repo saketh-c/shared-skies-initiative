@@ -70,7 +70,12 @@ state: dict = {}
 async def lifespan(app: FastAPI):
     # Load model in a thread so the event loop stays responsive
     if os.path.exists(MODEL_PATH):
-        state["bundle"] = await asyncio.to_thread(joblib.load, MODEL_PATH)
+        try:
+            # Use memory-mapping when possible to speed load and reduce peak memory
+            state['bundle'] = await asyncio.to_thread(joblib.load, MODEL_PATH, mmap_mode='r')
+        except TypeError:
+            # Older joblib versions may not accept mmap_mode; fall back to normal load
+            state['bundle'] = await asyncio.to_thread(joblib.load, MODEL_PATH)
         print(f"Model loaded. Features: {state['bundle']['feature_names']}")
     else:
         state["bundle"] = None
@@ -100,11 +105,26 @@ async def lifespan(app: FastAPI):
     # initial requests from the frontend don't time out when computing all tracts.
     async def _precompute_texas():
         try:
-            print("Background: precomputing Texas predictions...")
-            # Call the texas_predictions endpoint implementation directly
-            # but run in background to avoid blocking startup.
-            await texas_predictions()
-            print("Background: Texas precompute complete.")
+            print("Background: warming city caches (fast)...")
+            # Warm per-city caches (faster than a full Texas pass)
+            for city in CITIES:
+                try:
+                    await get_city_predictions(city)
+                    print(f"  warmed cache for {city}")
+                except Exception as e:
+                    print(f"  city precompute {city} failed: {e}")
+
+            # Defer full Texas precompute so startup stays responsive
+            async def _deferred_full_texas():
+                await asyncio.sleep(10)
+                try:
+                    print("Background: computing full Texas predictions (deferred)...")
+                    await texas_predictions()
+                    print("Background: Texas precompute complete.")
+                except Exception as e:
+                    print(f"Background Texas precompute failed: {e}")
+
+            asyncio.create_task(_deferred_full_texas())
         except Exception as e:
             print(f"Background Texas precompute failed: {e}")
 

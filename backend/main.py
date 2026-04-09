@@ -32,6 +32,11 @@ TEXAS_GEOJSON_PATH = os.path.join(STATIC_DIR, "texas_all_tracts.geojson")
 VISIT_COUNT_PATH = os.path.join(ROOT, "backend", "visit_count.json")
 VISITS_DB = os.path.join(ROOT, "backend", "visits.sqlite")
 
+# Upstash Redis REST — set these env vars in Render for persistent visit counts.
+# If not set, falls back to SQLite (resets on every server restart).
+UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
 # ── City Configuration (Generic, extensible design) ─────────────────────────
 CITIES = {
     "dallas": {
@@ -334,11 +339,10 @@ def pm25_color_gradient(pm25: float) -> str:
         factor = (pm25 - 9.0) / 3.9
         return interpolate_color("#FF6B6B", "#d63031", factor)
 
-    # Purple range: 13.0+
+    # Dark red range: 13.0+ (gets darker as pollution increases)
     else:
-        # Gradient from bright purple to dark purple (13.0-25+)
         factor = min(1.0, (pm25 - 13.0) / 12.0)
-        return interpolate_color("#9d4edd", "#3c096c", factor)
+        return interpolate_color("#8b0000", "#1a0000", factor)
 
 
 def pm25_info(pm25: float) -> dict:
@@ -468,7 +472,8 @@ async def get_city_predictions(city: str):
     return result
 
 
-# ── Persistent visits counter helpers
+# ── Persistent visits counter helpers ────────────────────────────────────────
+# Priority: Upstash Redis (truly persistent across restarts) > SQLite (ephemeral)
 
 def _get_visit_count_sync():
     conn = sqlite3.connect(VISITS_DB, timeout=5)
@@ -488,6 +493,29 @@ def _inc_visit_sync():
     row = cur.fetchone()
     conn.close()
     return int(row[0]) if row else 0
+
+
+async def _upstash_incr() -> int:
+    """Atomically increment the visit counter in Upstash Redis and return the new value."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.post(
+            f"{UPSTASH_URL}/incr/shared_skies_visits",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+        )
+        resp.raise_for_status()
+        return int(resp.json()["result"])
+
+
+async def _upstash_get() -> int:
+    """Get the current visit count from Upstash Redis."""
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(
+            f"{UPSTASH_URL}/get/shared_skies_visits",
+            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+        )
+        resp.raise_for_status()
+        val = resp.json().get("result")
+        return int(val) if val is not None else 0
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -520,24 +548,35 @@ async def list_cities():
 
 @app.post("/api/visit")
 async def record_visit():
-    """Increment a persistent visit counter and return the updated count."""
+    """Increment visit counter (Upstash Redis if configured, else SQLite) and return new total."""
     try:
-        new_count = await asyncio.to_thread(_inc_visit_sync)
+        if UPSTASH_URL and UPSTASH_TOKEN:
+            new_count = await _upstash_incr()
+        else:
+            new_count = await asyncio.to_thread(_inc_visit_sync)
         return {"visits": new_count}
     except Exception as e:
         print(f"Visit increment error: {e}")
-        raise HTTPException(500, "Visit increment failed")
+        # Last-resort fallback
+        try:
+            new_count = await asyncio.to_thread(_inc_visit_sync)
+            return {"visits": new_count}
+        except Exception:
+            return {"visits": 0}
 
 
 @app.get("/api/metrics")
 async def get_metrics():
-    """Return simple application metrics such as total visits."""
+    """Return total visit count (Upstash Redis if configured, else SQLite)."""
     try:
-        count = await asyncio.to_thread(_get_visit_count_sync)
+        if UPSTASH_URL and UPSTASH_TOKEN:
+            count = await _upstash_get()
+        else:
+            count = await asyncio.to_thread(_get_visit_count_sync)
         return {"visits": count}
     except Exception as e:
         print(f"Metrics read error: {e}")
-        raise HTTPException(500, "Metrics read failed")
+        return {"visits": 0}
 
 
 @app.get("/api/texas/predictions")

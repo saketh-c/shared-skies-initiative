@@ -38,8 +38,8 @@ const COLOR_SCALE = {
   hazardousRange: {
     min: 13.0,
     max: Infinity,
-    colorMin: "#9d4edd",   // Light purple
-    colorMax: "#3c096c",   // Dark purple
+    colorMin: "#8b0000",   // Dark red
+    colorMax: "#1a0000",   // Near-black dark red (gets darker as pollution rises)
     category: "Hazardous",
     label: "13+ µg/m³"
   }
@@ -123,7 +123,7 @@ export function pm25Color(pm25) {
     );
   }
 
-  // Hazardous (13+) - gradient from light purple to dark purple
+  // Hazardous (13+) - dark red that gets darker as pollution increases
   const hazardousFactor = Math.min(1.0, (pm25 - 13.0) / 12.0);
   return interpolateColor(
     COLOR_SCALE.hazardousRange.colorMin,
@@ -173,7 +173,7 @@ export function getAQIInfo(pm25) {
   return {
     category: COLOR_SCALE.hazardousRange.category,
     color: pm25Color(pm25),
-    bg: "rgba(157, 78, 221, 0.12)",
+    bg: "rgba(139, 0, 0, 0.12)",
     label: COLOR_SCALE.hazardousRange.label,
     aqi_range: "Hazardous",
     health_msg: "⚠️ Air quality is hazardous. Avoid all outdoor activities."
@@ -207,5 +207,5 @@ export const BREAKPOINTS = [
   { max: 3.9,   category: "Good",      color: "#00b894", label: "0–3.9" },
   { max: 8.9,   category: "Moderate",  color: "#FFD700", label: "4–8.9" },
   { max: 12.9,  category: "Unhealthy", color: "#d63031", label: "9–12.9" },
-  { max: Infinity, category: "Hazardous", color: "#9d4edd", label: "13+" },
+  { max: Infinity, category: "Hazardous", color: "#8b0000", label: "13+" },
 ];

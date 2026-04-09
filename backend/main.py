@@ -268,6 +268,31 @@ def run_prediction(tract_row: pd.Series, weather: dict, temporal: dict) -> float
     return max(0.0, float(pred))
 
 
+def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np.ndarray:
+    """
+    Vectorized batch prediction for an entire DataFrame of tracts.
+    Calls model.predict() once with all rows instead of once per tract —
+    ~50-100x faster than the per-row loop on slow CPUs (e.g. Render free tier).
+    """
+    bundle   = state["bundle"]
+    features = bundle["feature_names"]
+    weights  = bundle["weights"]
+    models   = bundle["models"]
+
+    shared = {**weather, **temporal}   # weather + temporal are same for all tracts
+    n = len(df)
+    X = np.zeros((n, len(features)), dtype=np.float64)
+
+    for i, feat in enumerate(features):
+        if feat in shared:
+            X[:, i] = shared[feat]          # broadcast scalar across all rows
+        elif feat in df.columns:
+            X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
+
+    preds = sum(weights[name] * models[name].predict(X) for name in models)
+    return np.maximum(0.0, preds)
+
+
 def hex_to_rgb(hex_color):
     """Convert hex color to RGB tuple."""
     hex_color = hex_color.lstrip('#')
@@ -399,14 +424,18 @@ async def get_city_predictions(city: str):
     temporal = get_temporal(city_config["tz"])
     tracts = []
 
-    for _, row in city_tracts.iterrows():
-        pm25 = run_prediction(row, weather, temporal)
+    # Vectorized batch prediction — single model.predict() call for all tracts
+    city_tracts_reset = city_tracts.reset_index(drop=True)
+    pm25_array = await asyncio.to_thread(run_predictions_batch, city_tracts_reset, weather, temporal)
+
+    for i, (_, row) in enumerate(city_tracts.iterrows()):
+        pm25 = round(float(pm25_array[i]), 2)
         info = pm25_info(pm25)
         tracts.append({
             "geoid":               row["GEOID"],
             "lat":                 round(float(row["lat"]), 6),
             "lon":                 round(float(row["lon"]), 6),
-            "pm25":                round(pm25, 2),
+            "pm25":                pm25,
             "category":            info["category"],
             "color":               info["color"],
             "aqi_range":           info["aqi_range"],
@@ -473,18 +502,6 @@ async def health():
     }
 
 
-@app.post("/api/visit")
-async def record_visit():
-    """Increment visit counter and return new total."""
-    state["visits"] = state.get("visits", 0) + 1
-    try:
-        with open(VISIT_COUNT_PATH, "w") as f:
-            json.dump({"visits": state["visits"]}, f)
-    except Exception:
-        pass
-    return {"visits": state["visits"]}
-
-
 @app.get("/api/cities")
 async def list_cities():
     """List available cities with metadata."""
@@ -546,7 +563,7 @@ async def texas_predictions():
     lookup = state["tract_lookup"]
     tracts = []
 
-    print("Generating predictions for all Texas tracts...")
+    print(f"Generating predictions for all {len(lookup)} Texas tracts (vectorized)...")
     # Use Austin as default weather location (central Texas)
     try:
         weather = await fetch_weather(30.2672, -97.7431)
@@ -556,17 +573,18 @@ async def texas_predictions():
 
     temporal = get_temporal("America/Chicago")
 
-    for idx, (_, row) in enumerate(lookup.iterrows()):
-        if idx % 1000 == 0:
-            print(f"  Processing tract {idx}/{len(lookup)}...")
+    # Vectorized batch prediction — single model.predict() call for all 6,900+ tracts
+    lookup_reset = lookup.reset_index(drop=True)
+    pm25_array = await asyncio.to_thread(run_predictions_batch, lookup_reset, weather, temporal)
 
-        pm25 = run_prediction(row, weather, temporal)
+    for i, (_, row) in enumerate(lookup.iterrows()):
+        pm25 = round(float(pm25_array[i]), 2)
         info = pm25_info(pm25)
         tracts.append({
             "geoid":               row["GEOID"],
             "lat":                 round(float(row["lat"]), 6),
             "lon":                 round(float(row["lon"]), 6),
-            "pm25":                round(pm25, 2),
+            "pm25":                pm25,
             "category":            info["category"],
             "color":               info["color"],
             "aqi_range":           info["aqi_range"],

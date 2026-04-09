@@ -29,6 +29,7 @@ STATIC_DIR = os.path.join(ROOT, "backend", "static")
 MODEL_PATH = os.path.join(ROOT, "models", "ensemble.joblib")
 LOOKUP_PATH = os.path.join(STATIC_DIR, "tract_lookup.parquet")
 TEXAS_GEOJSON_PATH = os.path.join(STATIC_DIR, "texas_all_tracts.geojson")
+VISIT_COUNT_PATH = os.path.join(ROOT, "backend", "visit_count.json")
 VISITS_DB = os.path.join(ROOT, "backend", "visits.sqlite")
 
 # ── City Configuration (Generic, extensible design) ─────────────────────────
@@ -95,6 +96,16 @@ async def lifespan(app: FastAPI):
     else:
         state["tract_lookup"] = None
         print("WARNING: backend/static/tract_lookup.parquet not found. Run pipeline/01_build_tract_lookup.py")
+
+    # Load visit count from file (persists within a deploy)
+    if os.path.exists(VISIT_COUNT_PATH):
+        try:
+            with open(VISIT_COUNT_PATH) as f:
+                state["visits"] = json.load(f).get("visits", 0)
+        except Exception:
+            state["visits"] = 0
+    else:
+        state["visits"] = 0
 
     # Per-city caches
     for city in CITIES:
@@ -460,6 +471,18 @@ async def health():
         "lookup_loaded": state.get("tract_lookup") is not None,
         "available_cities": list(CITIES.keys()),
     }
+
+
+@app.post("/api/visit")
+async def record_visit():
+    """Increment visit counter and return new total."""
+    state["visits"] = state.get("visits", 0) + 1
+    try:
+        with open(VISIT_COUNT_PATH, "w") as f:
+            json.dump({"visits": state["visits"]}, f)
+    except Exception:
+        pass
+    return {"visits": state["visits"]}
 
 
 @app.get("/api/cities")

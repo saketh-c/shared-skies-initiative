@@ -162,6 +162,7 @@ export default function SidePanel({
   error,
   lastUpdated,
   statewide = false,
+  visitCount,
 }) {
   const displayName = statewide ? "All of Texas" : "Region Overview";
   // Clean up county name — remove duplicate "County" if present
@@ -183,14 +184,6 @@ export default function SidePanel({
           {selectedTract
             ? `Tract ${selectedTract.geoid?.slice(-6)}${countyName ? ` · ${countyName} County` : ''}`
             : `${displayName} · Census Tract Level`}
-        </div>
-        {/* Trusted-by counter */}
-        <div className="trusted-badge">
-          {typeof visitCount === 'number' ? (
-            <span>Trusted by <strong>{visitCount.toLocaleString()}</strong> users across Texas</span>
-          ) : (
-            <span style={{opacity:0.7}}>Trusted by many users</span>
-          )}
         </div>
       </div>
 
@@ -250,6 +243,12 @@ export default function SidePanel({
       )}
 
       <div className="sidebar-footer">
+        {visitCount != null && (
+          <div className="visit-counter">
+            <span className="visit-counter-dot" />
+            <span><strong>{visitCount.toLocaleString()}</strong> visits</span>
+          </div>
+        )}
         {lastUpdated && (
           <div className="last-updated">Updated {timeAgo(lastUpdated)} · refreshes every 30 min</div>
         )}

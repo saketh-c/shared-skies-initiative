@@ -374,6 +374,40 @@
   line-height: 1.8;
 }
 
+.visit-counter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 20px;
+  padding: 5px 12px 5px 9px;
+  width: fit-content;
+}
+
+.visit-counter strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.visit-counter-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #00b894;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px #00b89488;
+  animation: pulse-live 2s ease-in-out infinite;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.75); }
+}
+
 .sidebar-footer a {
   color: rgba(0, 180, 216, 0.7);
   text-decoration: none;
@@ -454,19 +488,56 @@
   color: #fff !important;
 }
 
-.tract-tooltip {
-  background: rgba(9,13,32,0.95) !important;
-  border: 1px solid rgba(255,255,255,0.1) !important;
-  border-radius: 8px !important;
-  color: #f0f4ff !important;
-  font-family: 'Inter', sans-serif !important;
-  font-size: 12px !important;
-  padding: 8px 12px !important;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5) !important;
-  transition: transform 0.12s ease, font-size 0.12s ease, padding 0.12s ease !important;
+/* ── Custom map tooltip (replaces Leaflet bindTooltip) ───────────────────── */
+.custom-tract-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1200;
+  background: rgba(9, 13, 32, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 10px;
+  padding: 11px 15px 13px;
+  min-width: 165px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
-.tract-tooltip::before { display: none; }
+.ctt-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #f0f4ff;
+  margin-bottom: 7px;
+  white-space: nowrap;
+  letter-spacing: 0.1px;
+}
+
+.ctt-pm25 {
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  margin-bottom: 5px;
+  letter-spacing: -0.5px;
+}
+
+.ctt-unit {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.65;
+  letter-spacing: 0.2px;
+}
+
+.ctt-cat {
+  font-size: 12px;
+  color: rgba(240, 244, 255, 0.55);
+  margin-bottom: 2px;
+}
+
+.ctt-county {
+  font-size: 10px;
+  color: rgba(240, 244, 255, 0.32);
+  margin-top: 3px;
+}
 
 /* Disable transitions during rapid zoom to avoid labeling jank */
 .disable-transitions .tract-tooltip,

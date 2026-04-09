@@ -135,6 +135,44 @@ async def lifespan(app: FastAPI):
         # In some environments create_task must be called differently; ignore failures
         pass
 
+    # Keepalive loop: periodically ping an external URL (KEEPALIVE_URL)
+    # or call the internal health() endpoint to keep the process warm.
+    async def _keepalive_loop():
+        url = os.environ.get("KEEPALIVE_URL")
+        try:
+            interval = int(os.environ.get("KEEPALIVE_INTERVAL", "840"))  # seconds (14 minutes)
+        except Exception:
+            interval = 840
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            while True:
+                try:
+                    if url:
+                        try:
+                            resp = await client.get(url)
+                            print(f"Keepalive: pinged {url} status={resp.status_code}")
+                        except Exception as e:
+                            print(f"Keepalive HTTP error pinging {url}: {e}")
+                    else:
+                        # Fallback: call internal health() so FastAPI handlers run briefly
+                        try:
+                            await health()
+                            print("Keepalive: called internal health()")
+                        except Exception as e:
+                            print(f"Keepalive internal health() error: {e}")
+
+                    await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print(f"Keepalive loop error: {e}")
+                    await asyncio.sleep(60)
+
+    try:
+        asyncio.create_task(_keepalive_loop())
+    except Exception:
+        pass
+
     yield
 
 

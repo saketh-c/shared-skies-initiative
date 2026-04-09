@@ -227,19 +227,24 @@ const MapViewContent = forwardRef(
     const onTileLoadStart = useCallback(() => setTileLoadingCount((c) => c + 1), []);
     const onTileLoadEnd = useCallback(() => setTileLoadingCount((c) => Math.max(0, c - 1)), []);
 
-    useEffect(() => {
-      if (!map) return;
-      const handleZoomStart = () => document.body.classList.add("disable-transitions");
-      const handleZoomEnd = () => {
-        setTimeout(() => document.body.classList.remove("disable-transitions"), 80);
-      };
-      map.on("zoomstart", handleZoomStart);
-      map.on("zoomend", handleZoomEnd);
-      return () => {
-        map.off("zoomstart", handleZoomStart);
-        map.off("zoomend", handleZoomEnd);
-      };
-    }, [map]);
+    // MapLifecycle: attach map-level handlers using useMap inside a child component
+    function MapLifecycle() {
+      const map = useMap();
+      useEffect(() => {
+        if (!map) return;
+        const handleZoomStart = () => document.body.classList.add("disable-transitions");
+        const handleZoomEnd = () => {
+          setTimeout(() => document.body.classList.remove("disable-transitions"), 80);
+        };
+        map.on("zoomstart", handleZoomStart);
+        map.on("zoomend", handleZoomEnd);
+        return () => {
+          map.off("zoomstart", handleZoomStart);
+          map.off("zoomend", handleZoomEnd);
+        };
+      }, [map]);
+      return null;
+    }
 
     return (
       <MapContainer

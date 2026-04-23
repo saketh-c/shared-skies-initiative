@@ -37,6 +37,14 @@ VISITS_DB = os.path.join(ROOT, "backend", "visits.sqlite")
 UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
+# How long the *publicly-shown* visit count is cached before refreshing.
+# Real count still increments on every /api/visit — this only governs what
+# users see, so the number doesn't obviously tick up when someone refreshes.
+PUBLIC_VISITS_TTL_MIN = 10
+
+# Module-level cache for the displayed visit count
+_public_visits_cache: dict = {"count": None, "expires": datetime.min.replace(tzinfo=timezone.utc)}
+
 # ── City Configuration (Generic, extensible design) ─────────────────────────
 CITIES = {
     "dallas": {
@@ -518,6 +526,37 @@ async def _upstash_get() -> int:
         return int(val) if val is not None else 0
 
 
+async def _get_public_visit_count() -> int:
+    """Return the 10-min-cached visit count shown to users.
+    Backend keeps incrementing the real count on every /api/visit; this layer
+    only controls what's displayed so the number can't be watched ticking up.
+    All clients in the same 10-min window see the same value."""
+    global _public_visits_cache
+    now = datetime.now(timezone.utc)
+    cached_count = _public_visits_cache.get("count")
+    expires_at = _public_visits_cache.get("expires")
+
+    if cached_count is not None and expires_at is not None and now < expires_at:
+        return cached_count
+
+    # Cache miss or expired — read the true count and refresh the cache.
+    try:
+        if UPSTASH_URL and UPSTASH_TOKEN:
+            count = await _upstash_get()
+        else:
+            count = await asyncio.to_thread(_get_visit_count_sync)
+    except Exception as e:
+        print(f"Public visit cache refresh failed: {e}")
+        # If reading fails, keep showing the last good value rather than zero.
+        return cached_count if cached_count is not None else 0
+
+    _public_visits_cache = {
+        "count": count,
+        "expires": now + timedelta(minutes=PUBLIC_VISITS_TTL_MIN),
+    }
+    return count
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -548,32 +587,34 @@ async def list_cities():
 
 @app.post("/api/visit")
 async def record_visit():
-    """Increment visit counter (Upstash Redis if configured, else SQLite) and return new total."""
+    """Increment the real visit counter (Upstash if configured, else SQLite),
+    but return the *publicly-cached* total so users can't watch the number
+    tick up by refreshing. Real count stays accurate in storage."""
     try:
         if UPSTASH_URL and UPSTASH_TOKEN:
-            new_count = await _upstash_incr()
+            await _upstash_incr()
         else:
-            new_count = await asyncio.to_thread(_inc_visit_sync)
-        return {"visits": new_count}
+            await asyncio.to_thread(_inc_visit_sync)
     except Exception as e:
-        print(f"Visit increment error: {e}")
-        # Last-resort fallback
+        print(f"Visit increment error (primary): {e}")
+        # Last-resort fallback — try SQLite so we at least record something
         try:
-            new_count = await asyncio.to_thread(_inc_visit_sync)
-            return {"visits": new_count}
-        except Exception:
-            return {"visits": 0}
+            await asyncio.to_thread(_inc_visit_sync)
+        except Exception as e2:
+            print(f"Visit increment error (fallback): {e2}")
+    # Return the display-cached count (refreshes every PUBLIC_VISITS_TTL_MIN)
+    try:
+        return {"visits": await _get_public_visit_count()}
+    except Exception:
+        return {"visits": 0}
 
 
 @app.get("/api/metrics")
 async def get_metrics():
-    """Return total visit count (Upstash Redis if configured, else SQLite)."""
+    """Return the publicly-cached visit count (refreshes every ~10 min).
+    For the raw real-time count, read Upstash/SQLite directly."""
     try:
-        if UPSTASH_URL and UPSTASH_TOKEN:
-            count = await _upstash_get()
-        else:
-            count = await asyncio.to_thread(_get_visit_count_sync)
-        return {"visits": count}
+        return {"visits": await _get_public_visit_count()}
     except Exception as e:
         print(f"Metrics read error: {e}")
         return {"visits": 0}

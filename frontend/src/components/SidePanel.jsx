@@ -207,7 +207,7 @@ export default function SidePanel({
         </div>
 
         {/* Language toggle next to brand */}
-        <div style={{ paddingTop: 8, paddingLeft: 24 }}>
+        <div className="lang-toggle-wrap">
           <div className="lang-toggle" role="tablist" aria-label="Language selector">
             <button
               className={`lang-btn ${lang === 'en' ? 'active' : ''}`}

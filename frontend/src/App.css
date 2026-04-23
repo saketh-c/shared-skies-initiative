@@ -114,6 +114,12 @@
   padding-left: 42px;
 }
 
+/* Language toggle wrapper — matches prior inline padding so desktop is unchanged */
+.lang-toggle-wrap {
+  padding-top: 8px;
+  padding-left: 24px;
+}
+
 /* Language toggle (EN | ES) */
 .lang-toggle {
   display: inline-flex;
@@ -836,7 +842,76 @@
     border-bottom: 1px solid var(--glass-border);
   }
   .map-wrapper { height: 55vh; }
-  .pm25-number { font-size: 52px; }
+
+  /* ── Compact header: drop brand/back/tagline, keep user count + EN|ES ── */
+  .sidebar-header {
+    padding: 10px 14px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .sidebar-header .back-btn,
+  .sidebar-header .brand-left,
+  .sidebar-header .brand-tagline {
+    display: none;
+  }
+  .sidebar-header .brand {
+    margin: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .sidebar-header .lang-toggle-wrap {
+    padding: 0;
+    margin: 0;
+    flex: 0 0 auto;
+  }
+  .sidebar-header .lang-toggle {
+    margin-left: 0;
+  }
+
+  /* ── PM2.5 hero: grid layout so number + badge sit on one row ── */
+  .pm25-hero {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 12px;
+    row-gap: 2px;
+    align-items: center;
+    padding: 14px 16px 8px;
+  }
+  .pm25-label {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    margin-bottom: 2px;
+  }
+  .pm25-number-row {
+    grid-column: 1;
+    grid-row: 2;
+    align-items: baseline;
+  }
+  .aqi-badge {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    align-self: center;
+  }
+  .pm25-number {
+    font-size: 52px;
+    letter-spacing: -2px;
+  }
+
+  /* ── Tighten padding everywhere else on mobile ── */
+  .gauge-wrap          { padding: 0 16px 12px; }
+  .health-card         { margin: 0 16px 12px; padding: 10px 12px; font-size: 12.5px; }
+  .section-header      { padding: 0 16px 6px; }
+  .weather-grid        { padding: 0 16px 14px; gap: 6px; }
+  .weather-item        { padding: 10px 12px; }
+  .weather-item-value  { font-size: 18px; }
+  .ej-list             { padding: 0 16px 14px; gap: 10px; }
+  .distribution        { padding: 0 16px 14px; }
+  .prompt-hint         { margin: 0 16px 16px; padding: 12px; }
+  .sidebar-footer      { padding: 10px 16px; }
 
   /* Hide the search overlay by default on mobile — show only when toggled */
   .map-search-overlay {

@@ -24,6 +24,7 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [activeTab, setActiveTab] = useState("map");
   const [searchMarker, setSearchMarker] = useState(null);
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const mapRef = useRef(null);
   const [visitCount, setVisitCount] = useState(null);
 
@@ -121,6 +122,7 @@ export default function App() {
     if (nearestTract) {
       handleTractSelect(nearestTract.geoid);
       setSearchMarker({ lat: coords.lat, lon: coords.lon });
+      setSearchExpanded(false);
     }
   }, [predictions, handleTractSelect]);
 
@@ -165,7 +167,26 @@ export default function App() {
         </div>
 
         <div className="map-wrapper">
-          <div className="map-search-overlay">
+          <button
+            type="button"
+            className="mobile-search-toggle"
+            aria-label={searchExpanded ? (lang === 'es' ? 'Cerrar búsqueda' : 'Close search') : (lang === 'es' ? 'Abrir búsqueda' : 'Open search')}
+            aria-expanded={searchExpanded}
+            onClick={() => setSearchExpanded(v => !v)}
+          >
+            {searchExpanded ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+            )}
+          </button>
+          <div className={`map-search-overlay${searchExpanded ? ' expanded' : ''}`}>
             <SearchBar onSearch={handleSearch} loading={loading} />
           </div>
           <MapView

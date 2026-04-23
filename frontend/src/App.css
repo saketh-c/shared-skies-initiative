@@ -822,6 +822,9 @@
   margin: 0 0 8px;
 }
 
+/* Mobile-only search toggle button (hidden on desktop) */
+.mobile-search-toggle { display: none; }
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 700px) {
   .app-layout { flex-direction: column; }
@@ -834,4 +837,43 @@
   }
   .map-wrapper { height: 55vh; }
   .pm25-number { font-size: 52px; }
+
+  /* Hide the search overlay by default on mobile — show only when toggled */
+  .map-search-overlay {
+    display: none;
+    top: 68px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+  .map-search-overlay.expanded { display: block; }
+
+  /* Floating circle button at top-right of map to open the search */
+  .mobile-search-toggle {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    z-index: 1100;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(9, 13, 32, 0.92);
+    color: #f0f4ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: background 0.18s, transform 0.12s;
+  }
+  .mobile-search-toggle:hover,
+  .mobile-search-toggle:focus {
+    background: rgba(255, 255, 255, 0.1);
+    outline: none;
+  }
+  .mobile-search-toggle:active { transform: scale(0.94); }
 }

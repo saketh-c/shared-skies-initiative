@@ -3,6 +3,7 @@ import MapView from "./components/MapView.jsx";
 import SidePanel from "./components/SidePanel.jsx";
 import SearchBar from "./components/SearchBar.jsx";
 import AirQualityGuide from "./components/AirQualityGuide.jsx";
+import SensorPlacement from "./components/SensorPlacement.jsx";
 import { findNearestTract } from "./utils/geo.js";
 
 // API base URL: in production set VITE_API_URL=https://your-backend.onrender.com
@@ -27,6 +28,13 @@ export default function App() {
   const [searchExpanded, setSearchExpanded] = useState(false);
   const mapRef = useRef(null);
   const [visitCount, setVisitCount] = useState(null);
+
+  // Quantum sensor placement state
+  const [quantumData, setQuantumData] = useState(null);
+  const [quantumLoading, setQuantumLoading] = useState(false);
+  const [quantumError, setQuantumError] = useState(null);
+  const [quantumSensors, setQuantumSensors] = useState(null); // recommended sensors for map
+  const [existingSensors, setExistingSensors] = useState(null); // real PurpleAir sensors
 
   // language state (persisted in localStorage)
   const [lang, setLang] = useState(() => {
@@ -116,6 +124,46 @@ export default function App() {
     setLocalWeather(null);
   }, []);
 
+  const fetchQuantumData = useCallback(async () => {
+    try {
+      setQuantumLoading(true);
+      setQuantumError(null);
+      const res = await fetch(`${API_BASE}/api/quantum/sensor-placement`);
+      if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
+      const data = await res.json();
+      setQuantumData(data);
+      // Set sensor markers for map overlay
+      if (data?.methods?.quantum_annealing?.selected_tracts) {
+        setQuantumSensors(data.methods.quantum_annealing.selected_tracts);
+      }
+      // Set existing PurpleAir sensor locations
+      if (data?.existing_sensors) {
+        setExistingSensors(data.existing_sensors);
+      }
+    } catch (e) {
+      console.error("Failed to fetch quantum data:", e);
+      setQuantumError(e.message);
+    } finally {
+      setQuantumLoading(false);
+    }
+  }, []);
+
+  // Fetch quantum data when switching to the quantum tab
+  const handleTabChange = useCallback((tab) => {
+    setActiveTab(tab);
+    if (tab === "quantum" && !quantumData && !quantumLoading) {
+      fetchQuantumData();
+    }
+  }, [quantumData, quantumLoading, fetchQuantumData]);
+
+  const handleViewSensor = useCallback((sensor) => {
+    if (sensor?.lat && sensor?.lon) {
+      setSearchMarker({ lat: sensor.lat, lon: sensor.lon });
+      handleTractSelect(sensor.geoid);
+      setActiveTab("map");
+    }
+  }, [handleTractSelect]);
+
   const handleSearch = useCallback((coords) => {
     if (!predictions?.tracts) return;
     const nearestTract = findNearestTract(coords.lat, coords.lon, predictions.tracts);
@@ -134,15 +182,21 @@ export default function App() {
           <div className="sidebar-tabs">
             <button
               className={`sidebar-tab${activeTab === "map" ? " active" : ""}`}
-              onClick={() => setActiveTab("map")}
+              onClick={() => handleTabChange("map")}
             >
               Map
             </button>
             <button
-              className={`sidebar-tab${activeTab === "guide" ? " active" : ""}`}
-              onClick={() => setActiveTab("guide")}
+              className={`sidebar-tab${activeTab === "quantum" ? " active" : ""}`}
+              onClick={() => handleTabChange("quantum")}
             >
-              Air Quality Guide
+              {lang === "es" ? "Sensores" : "Sensors"}
+            </button>
+            <button
+              className={`sidebar-tab${activeTab === "guide" ? " active" : ""}`}
+              onClick={() => handleTabChange("guide")}
+            >
+              {lang === "es" ? "Guía" : "Guide"}
             </button>
           </div>
 
@@ -161,6 +215,13 @@ export default function App() {
                 visitCount={visitCount}
               />
             </>
+          ) : activeTab === "quantum" ? (
+            <SensorPlacement
+              quantumData={quantumData}
+              loading={quantumLoading}
+              error={quantumError}
+              onViewSensor={handleViewSensor}
+            />
           ) : (
             <AirQualityGuide />
           )}
@@ -198,6 +259,8 @@ export default function App() {
             selectedGeoid={selectedTract?.geoid ?? null}
             searchMarker={searchMarker}
             statewide={true}
+            sensorMarkers={activeTab === "quantum" ? quantumSensors : null}
+            existingSensors={activeTab === "quantum" ? existingSensors : null}
           />
         </div>
       </div>

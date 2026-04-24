@@ -1,5 +1,5 @@
 import { useMemo, useRef, useEffect, useState, forwardRef, useCallback, useContext } from "react";
-import { MapContainer, TileLayer, GeoJSON, useMap, Circle } from "react-leaflet";
+import { MapContainer, TileLayer, GeoJSON, useMap, Circle, CircleMarker, Tooltip } from "react-leaflet";
 import { BREAKPOINTS } from "../utils/aqi.js";
 import { LanguageContext } from '../App';
 import { t, translateCategory } from '../i18n';
@@ -106,7 +106,7 @@ function MapLifecycle() {
 }
 
 const MapViewContent = forwardRef(
-  ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker }, _ref) => {
+  ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker, sensorMarkers, existingSensors }, _ref) => {
     const { lang } = useContext(LanguageContext);
     const justClickedRef = useRef(false);
     const onTractSelectRef = useRef(onTractSelect);
@@ -350,6 +350,60 @@ const MapViewContent = forwardRef(
               pathOptions={{ color: "#fff", weight: 2, fillColor: "#0077b6", fillOpacity: 1 }}
             />
           )}
+
+          {/* Existing PurpleAir sensors (grey dots) */}
+          {existingSensors && existingSensors.map((s) => (
+            <CircleMarker
+              key={`existing-${s.sensor_id}`}
+              center={[s.lat, s.lon]}
+              radius={4}
+              pathOptions={{
+                color: "rgba(255,255,255,0.3)",
+                weight: 1,
+                fillColor: "rgba(255,255,255,0.25)",
+                fillOpacity: 0.7,
+              }}
+              interactive={false}
+              bubblingMouseEvents={false}
+            />
+          ))}
+
+          {/* Quantum sensor placement markers */}
+          {sensorMarkers && sensorMarkers.map((s, i) => (
+            <CircleMarker
+              key={`sensor-${s.geoid}`}
+              center={[s.lat, s.lon]}
+              radius={7}
+              pathOptions={{
+                color: "#fff",
+                weight: 2,
+                fillColor: "#00b4d8",
+                fillOpacity: 0.95,
+              }}
+              eventHandlers={{
+                click: () => {
+                  justClickedRef.current = true;
+                  onTractSelectRef.current?.(s.geoid);
+                },
+              }}
+            >
+              <Tooltip
+                direction="top"
+                offset={[0, -10]}
+                opacity={0.95}
+                className="sensor-tooltip"
+              >
+                <span style={{ fontWeight: 700 }}>#{s.placement_rank}</span>
+                {" "}{lang === "es" ? "Sensor Recomendado" : "Recommended Sensor"}
+                <br />
+                <span style={{ fontSize: 10, opacity: 0.7 }}>
+                  EJ: {((s.ej_priority || 0) * 100).toFixed(0)}%
+                  {" | "}
+                  {lang === "es" ? "Cob" : "Cov"}: {((s.coverage_need || 0) * 100).toFixed(0)}%
+                </span>
+              </Tooltip>
+            </CircleMarker>
+          ))}
 
           <TileLayer
             url={CARTO_LIGHT_LABELS}

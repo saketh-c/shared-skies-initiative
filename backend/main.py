@@ -271,34 +271,140 @@ def run_prediction(tract_row: pd.Series, weather: dict, temporal: dict) -> float
     weights  = bundle["weights"]
     models   = bundle["models"]
 
-    row = {**weather, **temporal}
+    row = _compute_v3_shared(weather, temporal)
+
+    # Add tract-level features
     for feat in features:
         if feat not in row:
             row[feat] = float(tract_row.get(feat, 0.0) or 0.0)
+
+    # v3 spatial features for single tract
+    if "elevation" in features and "elevation" not in row:
+        elev_path = os.path.join(ROOT, "pipeline", "elevations.json")
+        if os.path.exists(elev_path):
+            with open(elev_path) as f:
+                elev_data = json.load(f)
+            geoid = str(tract_row.get("GEOID", ""))
+            row["elevation"] = elev_data.get("tracts", {}).get(geoid, 0.0)
+    if "dist_to_coast" in features:
+        row.setdefault("dist_to_coast", abs(float(tract_row.get("lon", -97)) - (-94.0)))
+    if "dist_to_border" in features:
+        row.setdefault("dist_to_border", abs(float(tract_row.get("lat", 31)) - 26.0))
 
     X = np.array([[row.get(f, 0.0) for f in features]])
     pred = sum(weights[n] * models[n].predict(X)[0] for n in models)
     return max(0.0, float(pred))
 
 
+def _compute_v3_shared(weather: dict, temporal: dict) -> dict:
+    """Compute all derived features that are shared across tracts (weather + temporal)."""
+    month = temporal.get("month", 1)
+    dow = temporal.get("dow", 0)
+    doy = temporal.get("day_of_year", 1)
+    temp = weather.get("temperature", 72)
+    hum = weather.get("humidity", 55)
+    ws = weather.get("wind_speed", 8)
+    precip = weather.get("precipitation", 0)
+
+    shared = {**weather, **temporal}
+    shared["precipitation"] = precip
+    # Cyclical
+    shared["month_sin"] = np.sin(2 * np.pi * month / 12)
+    shared["month_cos"] = np.cos(2 * np.pi * month / 12)
+    shared["dow_sin"] = np.sin(2 * np.pi * dow / 7)
+    shared["dow_cos"] = np.cos(2 * np.pi * dow / 7)
+    shared["doy_sin"] = np.sin(2 * np.pi * doy / 365)
+    shared["doy_cos"] = np.cos(2 * np.pi * doy / 365)
+    # Interactions
+    shared["temp_x_humidity"] = temp * hum / 100.0
+    shared["wind_x_temp"] = ws * temp / 100.0
+    shared["wind_x_season"] = ws * shared["month_sin"]
+    shared["humidity_x_season"] = hum * shared["doy_cos"] / 100.0
+    shared["precip_x_temp"] = precip * temp / 100.0
+    # Rolling weather (at inference we only have current → use current as proxy)
+    shared["temperature_3d"] = temp
+    shared["humidity_3d"] = hum
+    shared["wind_speed_3d"] = ws
+    return shared
+
+
+def _add_v3_spatial(df: pd.DataFrame) -> pd.DataFrame:
+    """Add v3 spatial features to tract lookup DataFrame if not present."""
+    bundle = state.get("bundle", {})
+
+    # Elevation
+    if "elevation" not in df.columns:
+        elev_path = os.path.join(ROOT, "pipeline", "elevations.json")
+        if os.path.exists(elev_path):
+            with open(elev_path) as f:
+                elev_data = json.load(f)
+            tract_elev = elev_data.get("tracts", {})
+            df["elevation"] = df["GEOID"].map(tract_elev).fillna(0.0).astype(float)
+
+    # Distance to coast / border
+    if "dist_to_coast" not in df.columns:
+        df["dist_to_coast"] = np.abs(pd.to_numeric(df["lon"], errors="coerce").fillna(-97) - (-94.0))
+    if "dist_to_border" not in df.columns:
+        df["dist_to_border"] = np.abs(pd.to_numeric(df["lat"], errors="coerce").fillna(31) - 26.0)
+
+    # Spatial cluster distance
+    if "dist_to_cluster_center" not in df.columns:
+        cluster_path = os.path.join(MODELS_DIR, "spatial_clusters.joblib")
+        if os.path.exists(cluster_path):
+            kmeans = joblib.load(cluster_path)
+            lats = pd.to_numeric(df["lat"], errors="coerce").fillna(31).values
+            lons = pd.to_numeric(df["lon"], errors="coerce").fillna(-97).values
+            coords = np.column_stack([lats, lons])
+            clusters = kmeans.predict(coords)
+            centers = kmeans.cluster_centers_
+            df["dist_to_cluster_center"] = np.sqrt(
+                (lats - centers[clusters, 0])**2 + (lons - centers[clusters, 1])**2
+            )
+        else:
+            df["dist_to_cluster_center"] = 0.0
+
+    # Urban index
+    if "urban_index" not in df.columns:
+        df["urban_index"] = (
+            pd.to_numeric(df.get("traffic_proximity", 0), errors="coerce").fillna(0) * 0.4 +
+            pd.to_numeric(df.get("diesel_pm_proximity", 0), errors="coerce").fillna(0) * 0.3 +
+            pd.to_numeric(df.get("ejf_score", 0), errors="coerce").fillna(0) * 0.3
+        ) / 100.0
+
+    return df
+
+
 def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np.ndarray:
     """
-    Vectorized batch prediction for an entire DataFrame of tracts.
-    Calls model.predict() once with all rows instead of once per tract —
-    ~50-100x faster than the per-row loop on slow CPUs (e.g. Render free tier).
+    Vectorized batch prediction. Handles v1/v2/v3 feature sets automatically
+    based on what the loaded model expects.
     """
     bundle   = state["bundle"]
     features = bundle["feature_names"]
     weights  = bundle["weights"]
     models   = bundle["models"]
 
-    shared = {**weather, **temporal}   # weather + temporal are same for all tracts
+    shared = _compute_v3_shared(weather, temporal)
+
+    # Add spatial features to df if v3 model needs them
+    if any(f in features for f in ["elevation", "dist_to_coast", "urban_index"]):
+        df = _add_v3_spatial(df)
+
+    # Lookup uses lat/lon; v2 model was trained with latitude/longitude column names
+    feat_set = set(features)
+    if "latitude" in feat_set and "lat" in df.columns and "latitude" not in df.columns:
+        df = df.copy()
+        df["latitude"] = df["lat"]
+    if "longitude" in feat_set and "lon" in df.columns and "longitude" not in df.columns:
+        df = df.copy() if "latitude" not in df.columns else df
+        df["longitude"] = df["lon"]
+
     n = len(df)
     X = np.zeros((n, len(features)), dtype=np.float64)
 
     for i, feat in enumerate(features):
         if feat in shared:
-            X[:, i] = shared[feat]          # broadcast scalar across all rows
+            X[:, i] = shared[feat]
         elif feat in df.columns:
             X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
 
@@ -796,3 +902,226 @@ async def city_tracts_geojson(city: str):
     if not os.path.exists(geojson_path):
         raise HTTPException(503, f"GeoJSON not found for {city}. Run pipeline/01_build_tract_lookup.py first.")
     return FileResponse(geojson_path, media_type="application/geo+json")
+
+
+# ── Quantum Sensor Placement ────────────────────────────────────────────────
+_quantum_cache: dict = {"data": None, "expires": datetime.min.replace(tzinfo=timezone.utc)}
+QUANTUM_CACHE_TTL_MIN = 60
+
+# Path to PurpleAir sensor training data (contains real sensor locations)
+SENSOR_DATA_PATH = os.path.join(ROOT, "p2_processed.xls")
+LOSO_RESIDUALS_PATH = os.path.join(ROOT, "models", "loso_residuals.json")
+
+
+def _load_existing_sensors():
+    """Load 240 real PurpleAir sensor locations from training data."""
+    if not os.path.exists(SENSOR_DATA_PATH):
+        print("WARNING: p2_processed.xls not found — quantum solver won't have existing sensor locations")
+        return []
+    try:
+        try:
+            df = pd.read_csv(SENSOR_DATA_PATH, encoding="utf-8-sig", low_memory=False)
+        except Exception:
+            try:
+                df = pd.read_excel(SENSOR_DATA_PATH, engine="xlrd")
+            except Exception:
+                df = pd.read_excel(SENSOR_DATA_PATH, engine="openpyxl")
+
+        # De-duplicate to unique sensor locations
+        sensors_df = df.drop_duplicates(subset=["sensor_id"])[["sensor_id", "latitude", "longitude", "city"]].copy()
+        sensors_df = sensors_df.dropna(subset=["latitude", "longitude"])
+        sensors = [
+            {"lat": float(row["latitude"]), "lon": float(row["longitude"]),
+             "sensor_id": str(row["sensor_id"]), "city": str(row.get("city", ""))}
+            for _, row in sensors_df.iterrows()
+        ]
+        print(f"Loaded {len(sensors)} existing PurpleAir sensor locations for quantum solver")
+        return sensors
+    except Exception as e:
+        print(f"Failed to load sensor data: {e}")
+        return []
+
+
+def _compute_model_disagreement(df: pd.DataFrame, weather: dict, temporal: dict) -> np.ndarray:
+    """
+    Compute per-tract prediction uncertainty across weather perturbations.
+    Since the ensemble was retrained on full data, individual models may agree
+    closely. Instead, we measure sensitivity: how much does the prediction
+    change when weather varies? Tracts that are highly sensitive to weather
+    inputs are harder to predict accurately without a local sensor.
+    """
+    bundle = state["bundle"]
+    features = bundle["feature_names"]
+    weights = bundle["weights"]
+    models_dict = bundle["models"]
+
+    n = len(df)
+
+    def _predict_with_weather(w):
+        shared = {**w, **temporal}
+        X = np.zeros((n, len(features)), dtype=np.float64)
+        for i, feat in enumerate(features):
+            if feat in shared:
+                X[:, i] = shared[feat]
+            elif feat in df.columns:
+                X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
+        return np.maximum(0.0, sum(weights[name] * models_dict[name].predict(X)
+                                   for name in models_dict))
+
+    # Predict under several weather perturbations
+    base_pred = _predict_with_weather(weather)
+    perturbations = [
+        {**weather, "temperature": weather["temperature"] + 15},
+        {**weather, "temperature": weather["temperature"] - 15},
+        {**weather, "humidity": min(100, weather["humidity"] + 25)},
+        {**weather, "humidity": max(0, weather["humidity"] - 25)},
+        {**weather, "wind_speed": weather["wind_speed"] + 10},
+        {**weather, "pressure": weather["pressure"] + 15},
+    ]
+    all_preds = [base_pred] + [_predict_with_weather(w) for w in perturbations]
+    pred_stack = np.array(all_preds)
+    disagreement = np.std(pred_stack, axis=0)
+
+    return disagreement
+
+
+def _load_loso_residuals():
+    """Load per-GEOID LOSO-CV residuals for quantum solver."""
+    if not os.path.exists(LOSO_RESIDUALS_PATH):
+        return None
+    try:
+        with open(LOSO_RESIDUALS_PATH) as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Failed to load LOSO residuals: {e}")
+        return None
+
+
+async def _run_quantum_placement():
+    """Run quantum sensor placement with real data + LOSO residuals."""
+    from backend.quantum.qubo_solver import solve_quantum, compute_coverage
+
+    texas_data = await texas_predictions()
+    tracts = texas_data.get("tracts", [])
+
+    if not tracts:
+        raise HTTPException(503, "No tract predictions available. Wait for predictions to load.")
+
+    # Load real PurpleAir sensor locations
+    existing_sensors = await asyncio.to_thread(_load_existing_sensors)
+
+    # Load LOSO-CV residuals (true spatial prediction errors)
+    loso_residuals = await asyncio.to_thread(_load_loso_residuals)
+
+    # Build per-tract model disagreement from LOSO residuals
+    model_disagreement = None
+    if loso_residuals:
+        lookup = state.get("tract_lookup")
+        if lookup is not None:
+            geoids = lookup["GEOID"].astype(str).str.zfill(11).values
+            model_disagreement = np.array([
+                loso_residuals.get(g, 0.0) for g in geoids
+            ], dtype=np.float64)
+            print(f"LOSO residuals loaded: mean={model_disagreement.mean():.3f}, "
+                  f"max={model_disagreement.max():.3f}")
+
+    # Fallback to weather sensitivity if no LOSO residuals
+    if model_disagreement is None:
+        if state.get("bundle") and state.get("tract_lookup") is not None:
+            try:
+                weather = texas_data.get("weather", {
+                    "temperature": 72.0, "humidity": 55.0,
+                    "pressure": 1013.0, "wind_speed": 8.0,
+                })
+                temporal = get_temporal("America/Chicago")
+                model_disagreement = await asyncio.to_thread(
+                    _compute_model_disagreement, state["tract_lookup"],
+                    weather, temporal)
+            except Exception as e:
+                print(f"Disagreement computation failed: {e}")
+
+    # Run quantum solver only
+    quantum_result = await asyncio.to_thread(
+        solve_quantum,
+        tracts,
+        k=25,
+        num_reads=500,
+        top_candidates=120,
+        proximity_threshold_miles=8.0,
+        existing_sensors=existing_sensors,
+        model_disagreement=model_disagreement,
+    )
+
+    # Compute coverage
+    coverage = compute_coverage(
+        tracts, quantum_result["selected_tracts"],
+        radius_miles=10.0,
+        existing_sensors=existing_sensors,
+    )
+
+    avg_ej = float(np.mean([
+        t.get("ejf_score", 0.0) or 0.0
+        for t in quantum_result["selected_tracts"]
+    ])) if quantum_result["selected_tracts"] else 0.0
+
+    avg_composite = float(np.mean([
+        t["composite_score"]
+        for t in quantum_result["selected_tracts"]
+    ])) if quantum_result["selected_tracts"] else 0.0
+
+    now = datetime.now(timezone.utc)
+    result = {
+        "generated_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=QUANTUM_CACHE_TTL_MIN)).isoformat(),
+        "num_total_tracts": len(tracts),
+        "num_sensors": 25,
+        "num_existing_sensors": len(existing_sensors),
+        "proximity_threshold_miles": 8.0,
+        "coverage_radius_miles": 10.0,
+        "existing_sensors": existing_sensors,
+        "methods": {
+            "quantum_annealing": {
+                "method_display": quantum_result["method_display"],
+                "num_sensors": quantum_result["num_sensors"],
+                "coverage": coverage,
+                "avg_ej_score": round(avg_ej, 1),
+                "avg_composite_score": round(avg_composite, 4),
+                "timing": quantum_result["timing"],
+                "selected_tracts": quantum_result["selected_tracts"],
+                "best_energy": quantum_result.get("best_energy"),
+                "num_reads": quantum_result.get("num_reads"),
+                "num_candidates": quantum_result.get("num_candidates"),
+            },
+        },
+    }
+
+    return result
+
+
+@app.get("/api/quantum/sensor-placement")
+async def quantum_sensor_placement():
+    """
+    Returns quantum-optimized sensor placement recommendations.
+    Compares three methods: Quantum Annealing, Greedy, Classical SA.
+    Uses real PurpleAir sensor locations + ensemble model disagreement.
+    Results are cached for 1 hour.
+    """
+    global _quantum_cache
+    now = datetime.now(timezone.utc)
+
+    if (_quantum_cache.get("data") and
+        now < _quantum_cache.get("expires", datetime.min.replace(tzinfo=timezone.utc))):
+        return _quantum_cache["data"]
+
+    try:
+        result = await _run_quantum_placement()
+        _quantum_cache = {
+            "data": result,
+            "expires": now + timedelta(minutes=QUANTUM_CACHE_TTL_MIN),
+        }
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Quantum placement error: {e}")
+        raise HTTPException(500, f"Quantum solver failed: {str(e)}")

@@ -1003,3 +1003,489 @@
   }
   .mobile-legend-toggle:active { transform: scale(0.94); }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* ── Quantum Sensor Placement Tab ──────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════════ */
+
+.qm-container {
+  padding: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Header ── */
+.qm-header {
+  padding: 24px 24px 0;
+}
+
+.qm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+  margin-bottom: 6px;
+}
+
+.qm-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* ── Existing sensor info ── */
+.qm-existing-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  margin: 0 24px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.qm-existing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+}
+
+.qm-existing-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* ── Key Metrics Grid ── */
+.qm-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 0 24px;
+}
+
+.qm-metric-card {
+  background: var(--card);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 14px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qm-metric-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+}
+
+.qm-metric-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+
+.qm-metric-sub {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* ── Method Toggle ── */
+.qm-method-toggle {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px;
+}
+
+.qm-method-btn {
+  flex: 1;
+  padding: 8px 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  position: relative;
+}
+
+.qm-method-btn.active {
+  background: rgba(0, 180, 216, 0.12);
+  border-color: rgba(0, 180, 216, 0.3);
+  color: #00b4d8;
+}
+
+.qm-method-btn:hover:not(.active) {
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--text);
+}
+
+.qm-star {
+  color: #FFD700;
+  font-weight: 800;
+  margin-right: 2px;
+}
+
+/* ── Method Comparison ── */
+.qm-comparison {
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qm-method-row {
+  background: var(--card);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  transition: border-color 0.15s;
+}
+
+.qm-method-row.best {
+  border-color: rgba(0, 180, 216, 0.3);
+  background: rgba(0, 180, 216, 0.06);
+}
+
+.qm-method-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qm-best-badge {
+  font-size: 9px;
+  font-weight: 800;
+  color: #00b4d8;
+  background: rgba(0, 180, 216, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.qm-method-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.qm-method-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.qm-method-stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.qm-method-stat-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ── EJ Quartile Bars ── */
+.qm-ej-bars {
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qm-ej-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qm-ej-bar-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.qm-ej-bar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.qm-ej-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #00b4d8, #0077b6);
+  transition: width 0.5s ease;
+}
+
+.qm-ej-bar-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 36px;
+  text-align: right;
+}
+
+.qm-ej-bar-detail {
+  font-size: 10px;
+  color: var(--text-dim);
+  min-width: 48px;
+  text-align: right;
+}
+
+/* ── Sensor List ── */
+.qm-sensor-list {
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qm-sensor-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.qm-sensor-item:hover {
+  background: var(--card-hover);
+  border-color: rgba(0, 180, 216, 0.2);
+}
+
+.qm-sensor-rank {
+  font-size: 13px;
+  font-weight: 800;
+  color: #00b4d8;
+  min-width: 28px;
+}
+
+.qm-sensor-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.qm-sensor-geoid {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qm-sensor-county {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.qm-sensor-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 70px;
+}
+
+.qm-sensor-score-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qm-score-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-dim);
+  min-width: 22px;
+  text-transform: uppercase;
+}
+
+.qm-score-bar-bg {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.qm-score-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.qm-score-bar-fill.ej {
+  background: linear-gradient(90deg, #FF6B6B, #d63031);
+}
+
+.qm-score-bar-fill.cov {
+  background: linear-gradient(90deg, #00b894, #00b4d8);
+}
+
+.qm-sensor-composite {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  min-width: 28px;
+  text-align: right;
+}
+
+/* ── Loading State ── */
+.qm-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 60px 24px;
+}
+
+.qm-loading-icon {
+  width: 64px;
+  height: 64px;
+  position: relative;
+}
+
+.qm-atom {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.qm-nucleus {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: #00b4d8;
+  box-shadow: 0 0 12px #00b4d8, 0 0 24px rgba(0, 180, 216, 0.4);
+}
+
+.qm-orbit {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100%;
+  border: 1.5px solid rgba(0, 180, 216, 0.3);
+  border-radius: 50%;
+  animation: qm-spin 3s linear infinite;
+}
+
+.qm-orbit::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: #00b4d8;
+  box-shadow: 0 0 6px #00b4d8;
+}
+
+.qm-orbit-1 { transform: rotateX(70deg) rotateY(0deg); animation-duration: 2.5s; }
+.qm-orbit-2 { transform: rotateX(70deg) rotateY(60deg); animation-duration: 3.2s; animation-direction: reverse; }
+.qm-orbit-3 { transform: rotateX(70deg) rotateY(120deg); animation-duration: 2.8s; }
+
+@keyframes qm-spin {
+  from { transform: rotateX(70deg) rotateY(var(--start, 0deg)) rotateZ(0deg); }
+  to   { transform: rotateX(70deg) rotateY(var(--start, 0deg)) rotateZ(360deg); }
+}
+
+.qm-orbit-1 { --start: 0deg; }
+.qm-orbit-2 { --start: 60deg; }
+.qm-orbit-3 { --start: 120deg; }
+
+.qm-loading-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.qm-loading-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ── Error State ── */
+.qm-error {
+  margin: 16px 24px;
+  padding: 16px;
+  border-radius: var(--radius);
+  background: rgba(214, 48, 49, 0.1);
+  border: 1px solid rgba(214, 48, 49, 0.25);
+  font-size: 12px;
+  color: #ff7675;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qm-error code {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* ── Sensor Map Markers ── */
+.sensor-tooltip {
+  background: rgba(9, 13, 32, 0.95) !important;
+  border: 1px solid rgba(0, 180, 216, 0.3) !important;
+  border-radius: 8px !important;
+  color: #f0f4ff !important;
+  font-size: 11px !important;
+  padding: 6px 10px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+}
+
+.sensor-tooltip::before {
+  border-top-color: rgba(9, 13, 32, 0.95) !important;
+}
+
+/* ── Mobile adjustments for quantum tab ── */
+@media (max-width: 700px) {
+  .qm-header { padding: 14px 16px 0; }
+  .qm-title { font-size: 14px; }
+  .qm-metrics-grid { padding: 0 16px; gap: 6px; }
+  .qm-metric-card { padding: 10px 12px; }
+  .qm-metric-value { font-size: 18px; }
+  .qm-method-toggle { padding: 0 16px; }
+  .qm-comparison { padding: 0 16px; }
+  .qm-ej-bars { padding: 0 16px; }
+  .qm-sensor-list { padding: 0 16px; }
+  .qm-loading { padding: 40px 16px; }
+}

@@ -10,3 +10,6 @@ pyarrow
 httpx
 openpyxl
 xlrd
+dwave-neal
+dimod
+networkx

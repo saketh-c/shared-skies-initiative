@@ -300,17 +300,28 @@ export default function SidePanel({
 
       <div className="sidebar-footer">
         {lastUpdated && (
-          <div className="last-updated">
-            {t(lang, "updated", timeAgo(lastUpdated, lang))}
+          <div className="footer-row">
+            <span className="last-updated">
+              {t(lang, "updated", timeAgo(lastUpdated, lang))}
+            </span>
           </div>
         )}
-        {lang === "es"
-          ? "Datos: EPA EJScreen · Open-Meteo · Modelo de ensamblado ML"
-          : "Data: EPA EJScreen · Open-Meteo · ML ensemble model"}
-        <br />
-        {lang === "es" ? "Creado por" : "Built by"}{" "}
-        <a href="https://uupm.cc" target="_blank" rel="noreferrer">Shared Skies Initiative</a>{" "}
-        · {lang === "es" ? "Cobertura en todo Texas" : "Texas-wide Coverage"}
+        <div className="footer-row footer-data">
+          {lang === "es"
+            ? "Datos: EPA EJScreen · Open-Meteo · Modelo de ensamblado ML"
+            : "Data: EPA EJScreen · Open-Meteo · ML ensemble model"}
+        </div>
+        <div className="footer-row footer-built">
+          {lang === "es" ? "Creado por" : "Built by"}{" "}
+          <a
+            href="https://sharedskiesinitiative.org/real-time-map"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Shared Skies Initiative
+          </a>{" "}
+          · {lang === "es" ? "Cobertura en todo Texas" : "Texas-wide Coverage"}
+        </div>
       </div>
     </aside>
   );

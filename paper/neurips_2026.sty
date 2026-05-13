@@ -1,0 +1,139 @@
+%%% ---------------------------------------------------------------------------
+%%% neurips_2026.sty -- LOCAL FALLBACK VERSION
+%%%
+%%% This is a functional approximation of the official NeurIPS 2026 style
+%%% file, provided so the paper compiles immediately. Before submission,
+%%% REPLACE this file with the official neurips_2026.sty distributed by
+%%% NeurIPS at:
+%%%
+%%%     https://neurips.cc/Conferences/2026
+%%%
+%%% The official file enforces double-blind anonymization, line numbers,
+%%% and the exact margins required by the conference. This fallback
+%%% approximates those requirements and will produce a paper that LOOKS
+%%% correct but may not be pixel-identical to the official format.
+%%% ---------------------------------------------------------------------------
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{neurips_2026}[2026/01/01 NeurIPS 2026 local fallback style]
+
+%% ----- Options ----------------------------------------------------------
+\newif\ifnips@final\nips@finalfalse
+\newif\ifnips@preprint\nips@preprintfalse
+\newif\ifnips@nonatbib\nips@nonatbibfalse
+\newif\ifnips@workshop\nips@workshopfalse
+
+\DeclareOption{final}{\nips@finaltrue}
+\DeclareOption{preprint}{\nips@preprinttrue}
+\DeclareOption{main}{}
+\DeclareOption{position}{}
+\DeclareOption{eandd}{}
+\DeclareOption{creativeai}{}
+\DeclareOption{sglblindworkshop}{\nips@workshoptrue}
+\DeclareOption{dblblindworkshop}{\nips@workshoptrue}
+\DeclareOption{nonanonymous}{}
+\DeclareOption{nonatbib}{\nips@nonatbibtrue}
+\ProcessOptions\relax
+
+%% ----- Packages ---------------------------------------------------------
+\RequirePackage{fancyhdr}
+\RequirePackage{etoolbox}
+\RequirePackage{xcolor}
+\RequirePackage{enumitem}
+
+\ifnips@nonatbib\else
+  \RequirePackage[numbers,sort&compress]{natbib}
+\fi
+
+%% ----- Page geometry (matches NeurIPS specification) -------------------
+\RequirePackage[
+  left=1.5in, right=1.5in, top=1in, bottom=1.25in,
+  paper=letterpaper, headheight=12pt, headsep=10pt,
+]{geometry}
+
+%% ----- Fonts ------------------------------------------------------------
+\RequirePackage{times}
+\renewcommand{\familydefault}{\rmdefault}
+
+%% ----- Body sizing -----------------------------------------------------
+\renewcommand\normalsize{%
+  \@setfontsize\normalsize{10pt}{11pt}%
+  \abovedisplayskip 8pt \@plus 2pt \@minus 4pt
+  \abovedisplayshortskip \z@ \@plus 3pt
+  \belowdisplayshortskip 4pt \@plus 3pt \@minus 3pt
+  \belowdisplayskip \abovedisplayskip
+}
+
+%% ----- Title formatting ------------------------------------------------
+\renewcommand{\@maketitle}{%
+  \newpage\null%
+  \vspace*{-0.2in}%
+  \begingroup\centering%
+    \hrule height 4pt\relax\vspace{0.2em}%
+    {\fontsize{17pt}{20pt}\selectfont\bfseries\@title\par}%
+    \vspace{0.2em}\hrule height 1pt\relax\vspace{1em}%
+    \ifnips@final\else\ifnips@preprint%
+      {\large\@author\par}%
+    \else%
+      {\large Anonymous Author(s)\par}%
+      \vspace{2pt}%
+      {\small Affiliation\\Address\\\texttt{email}\par}%
+    \fi\fi%
+    \vspace{0.5em}%
+  \endgroup%
+  \vskip 0.5em%
+}
+
+%% ----- Section formatting ----------------------------------------------
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-2.5ex \@plus -1ex \@minus -.2ex}%
+  {1ex \@plus.2ex}%
+  {\normalfont\large\bfseries}}
+
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2ex\@plus -1ex \@minus -.2ex}%
+  {0.8ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries}}
+
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-1.5ex\@plus -1ex \@minus -.2ex}%
+  {0.6ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries}}
+
+\renewcommand\paragraph{\@startsection{paragraph}{4}{\z@}%
+  {1em \@plus 0.2em \@minus 0.2em}%
+  {-1em}%
+  {\normalfont\normalsize\bfseries}}
+
+%% ----- Abstract formatting ---------------------------------------------
+\renewenvironment{abstract}{%
+  \vspace{0.5em}%
+  \centerline{\bfseries\large Abstract}%
+  \vspace{0.25em}%
+  \begin{quote}\small%
+}{%
+  \end{quote}\vspace{0.5em}%
+}
+
+%% ----- Caption formatting ----------------------------------------------
+\RequirePackage[font={small},labelfont=bf,labelsep=period]{caption}
+
+%% ----- Footer ----------------------------------------------------------
+\ifnips@preprint
+  \AtBeginDocument{\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\itshape Preprint. Work in progress.}\renewcommand{\headrulewidth}{0pt}}\thispagestyle{plain}\pagestyle{plain}}
+\fi
+
+%% ----- Acknowledgements environment -----------------------------------
+\newenvironment{ack}{\section*{Acknowledgments and Disclosure of Funding}}{}
+
+%% ----- Workshop title support ------------------------------------------
+\newcommand{\workshoptitle}[1]{\def\nips@workshoptitle{#1}}
+
+%% ----- Paper checklist macros -----------------------------------------
+\newcommand{\answerYes}[1][]{\color{green!55!black}[Yes] #1\color{black}}
+\newcommand{\answerNo}[1][]{\color{red!75!black}[No] #1\color{black}}
+\newcommand{\answerNA}[1][]{\color{gray}[NA] #1\color{black}}
+\newcommand{\answerTODO}{\color{red}\bfseries{[TODO]}\color{black}}
+\newcommand{\justificationTODO}{\color{red}\bfseries{[TODO]}\color{black}}
+
+\endinput

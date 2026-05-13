@@ -11,4 +11,23 @@ build/
 backend/static/state_*_tracts.geojson
 backend/static/us_all_tracts.geojson
 .claude/
+.DS_Store
+
+# Large raw datasets (exceed GitHub 100MB limit) — kept locally only
+pipeline/purpleair_full_dataset.csv
+p2_processed_v2.xls
+
+# API cache from data pull scripts
+pipeline/data_pull_cache/
+
+# Standalone landing site build artifacts
+website/node_modules/
+website/dist/
+
+# Paper build artifacts
+paper/.DS_Store
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
 

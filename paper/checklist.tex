@@ -1,0 +1,85 @@
+\section*{NeurIPS Paper Checklist}
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Question: Do the main claims made in the abstract and introduction accurately reflect the paper's contributions and scope?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract lists four specific contributions (a 240-fold LOSO-CV benchmark, quantified evaluation bias, fairness-stratified error analysis, and an EJ audit) that are each delivered in a numbered section of the paper. Numerical claims (e.g., $R^2=0.810$, $r=0.875$, 85.1\% Q4 exceedance) match the tables and figures.
+
+\item {\bf Limitations}
+    \item[] Question: Does the paper discuss the limitations of the work performed by the authors?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~9 enumerates six concrete limitations: the spatial-generalization ceiling at $R^2\approx 0.81$, the cold-start problem for autoregressive features at newly-instrumented tracts, low-cost sensor measurement bias, the static treatment of EJScreen indicators, restricted temporal range (calendar year 2025), and the distinction between necessary and sufficient fairness conditions.
+
+\item {\bf Theory assumptions and proofs}
+    \item[] Question: For each theoretical result, does the paper provide the full set of assumptions and a complete (and correct) proof?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The paper is empirical and presents no theoretical results or proofs.
+
+\item {\bf Experimental result reproducibility}
+    \item[] Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~6 and Appendix~\ref{sec:hparams} give exact hyperparameters, random seeds, and training procedure. Section~4 specifies the data sources and preprocessing. Section~5 specifies the LOSO-CV and random-split protocols. We release anonymized data splits and code (Section~9).
+
+\item {\bf Open access to data and code}
+    \item[] Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental material?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Anonymized data splits, preprocessing pipeline, and training scripts are provided in the supplementary zip. The README specifies exact commands to reproduce each table and figure in the paper. Hyperparameters are enumerated in Appendix~\ref{sec:hparams}.
+
+\item {\bf Experimental setting/details}
+    \item[] Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~5 specifies both data splits (Random 80/20 with \texttt{random\_state=42}; LOSO-CV across all 240 sensor folds). Section~6 lists all hyperparameters; we did not conduct hyperparameter search and report default values from prior literature.
+
+\item {\bf Experiment statistical significance}
+    \item[] Question: Does the paper report error bars suitably and correctly defined or other appropriate information about the statistical significance of the experiments?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: LOSO-CV per-fold standard deviations are reported in Table~\ref{tab:results}. Figure~\ref{fig:fairness} reports standard errors across sensors within each EJ quartile. The EJ correlation statistics report both $r$ and $p$-values.
+
+\item {\bf Experiments compute resources}
+    \item[] Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce the experiments?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~6 states: all experiments run on a single 10-core Apple M-series CPU with 16~GB RAM; full LOSO-CV plus SVR on the random split takes approximately 45~min wall-clock.
+
+\item {\bf Code of ethics}
+    \item[] Question: Does the research conducted in the paper conform, in every respect, with the NeurIPS Code of Ethics \url{https://neurips.cc/public/EthicsGuidelines}?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The paper uses publicly available sensor data (PurpleAir) and aggregate census tract data (EPA EJScreen, U.S. Census). No personally identifiable information is collected, stored, or released. The work is directly motivated by reducing environmental-health disparities and is conducted in accordance with the NeurIPS Code of Ethics.
+
+\item {\bf Broader impacts}
+    \item[] Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~8 (EJ analysis) quantifies disparate exposure across communities and identifies \num{3.77} million Texans above the 2024 NAAQS --- a positive impact via policy-relevant evidence. Section~9 discusses the risks of over-confident deployment: low-cost sensor calibration offsets, uneven sensor coverage, and the limits of a one-year temporal window. We explicitly note that any policy use of these predictions should accompany the predicted exposure with the model's per-quartile RMSE.
+
+\item {\bf Safeguards}
+    \item[] Question: Does the paper describe safeguards that have been put in place for responsible release of data or models that have a high risk for misuse (e.g., pre-trained language models, image generators, or scraped datasets)?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The released model predicts census-tract PM\textsubscript{2.5}, which poses no meaningful misuse risk and does not involve personal data, generative capability, or dual-use concerns.
+
+\item {\bf Licenses for existing assets}
+    \item[] Question: Are the creators or original owners of assets (e.g., code, data, models), used in the paper, properly credited and are the license and terms of use explicitly mentioned and properly respected?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: PurpleAir data is used under the PurpleAir Terms of Service; EPA EJScreen is public-domain; NOAA GHCN is public-domain; U.S.\ Census TIGER shapefiles are public-domain. All software dependencies (scikit-learn BSD-3, LightGBM MIT, XGBoost Apache-2.0, matplotlib PSF) are credited in the code release README.
+
+\item {\bf New assets}
+    \item[] Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The released code includes a README documenting the dataset schema, preprocessing steps, model training, and figure-generation scripts. The code is released under MIT license.
+
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable, as well as details about compensation (if any)?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The paper does not involve crowdsourcing or research with human subjects. All data is environmental sensor and aggregate demographic data.
+
+\item {\bf Institutional review board (IRB) approvals or equivalent for research with human subjects}
+    \item[] Question: Does the paper describe potential risks incurred by study participants, whether such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) approvals (or an equivalent approval/review based on the requirements of your country or institution) were obtained?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects research was conducted.
+
+\item {\bf Declaration of LLM usage}
+    \item[] Question: Does the paper describe the usage of LLMs if it is an important, original, or non-standard component of the core methods in this research? Note that if the LLM is used only for writing, editing, or formatting purposes and does \emph{not} impact the core methodology, scientific rigor, or originality of the research, declaration is not required.
+    \item[] Answer: \answerNA{}
+    \item[] Justification: LLMs were used only for editing assistance during manuscript preparation and did not contribute to the methodology, experiments, or analysis. No LLMs are part of the core method.
+
+\end{enumerate}

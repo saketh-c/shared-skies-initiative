@@ -18,7 +18,7 @@ EXPECTED = [
     "traffic_proximity", "superfund_proximity", "rmp_proximity",
     "diesel_pm_proximity", "pct_ling_isolated",
     "latitude", "longitude",
-    "month", "hour", "dow", "day_of_year",
+    "month", "dow", "day_of_year",  # hour intentionally dropped — daily data
     "month_sin", "month_cos", "dow_sin", "dow_cos", "doy_sin", "doy_cos",
     "temp_x_humidity", "wind_x_temp",
 ]

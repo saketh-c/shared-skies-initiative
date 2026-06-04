@@ -16,6 +16,7 @@ backend/static/snapshots/
 
 # Large raw datasets (exceed GitHub 100MB limit) — kept locally only
 pipeline/purpleair_full_dataset.csv
+pipeline/purpleair_training_ready.csv
 p2_processed_v2.xls
 
 # API cache from data pull scripts

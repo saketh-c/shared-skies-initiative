@@ -58,7 +58,12 @@ OPEN_METEO_RENAME = {
     "precipitation_sum":           "precipitation",
 }
 
-PM25_MIN, PM25_MAX = 0.0, 500.0
+PM25_MIN, PM25_MAX = 0.0, 200.0
+# Per-sensor robust-z outlier threshold. 6 was so tight that EVERY high-PM event
+# (NYE fireworks, wildfire smoke, dust storms) got clipped — the dataset's max
+# collapsed to 77.8 µg/m³ with zero rows >100. 20 keeps real events while still
+# rejecting obvious single-row sensor faults.
+MAD_Z_MAX = 20.0
 
 
 # --------------------------------------------------------------------------------------
@@ -149,6 +154,11 @@ def load_open_meteo(lat: float, lon: float) -> Optional[pd.DataFrame]:
     df = df.drop(columns=["time"])
     df = df.rename(columns=OPEN_METEO_RENAME)
     df["weather_source"] = "open_meteo"
+    # Open-Meteo defaults to km/h; convert to m/s so all rows share NASA POWER's unit.
+    # Without this, trees learn a "which source?" split instead of weather→PM physics.
+    for col in ("wind_speed", "wind_gusts"):
+        if col in df.columns:
+            df[col] = df[col] / 3.6
     return df
 
 
@@ -167,9 +177,9 @@ def quality_filter(df: pd.DataFrame) -> pd.DataFrame:
     mad = grp.transform(lambda x: (x - x.median()).abs().median())
     mad = mad.replace(0, mad[mad > 0].median() if (mad > 0).any() else 1.0)
     z = (df["pm25"] - med).abs() / (1.4826 * mad)
-    df = df[z < 6]
+    df = df[z < MAD_Z_MAX]
     n2 = len(df)
-    print(f"[qc] per-sensor >6 MAD outliers: removed {n1-n2:,} rows ({n1:,} → {n2:,})")
+    print(f"[qc] per-sensor >{MAD_Z_MAX:g} MAD outliers: removed {n1-n2:,} rows ({n1:,} → {n2:,})")
     counts = df.groupby("sensor_id").size()
     good = counts[counts >= 60].index
     n_dropped_sensors = len(counts) - len(good)

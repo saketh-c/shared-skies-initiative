@@ -35,7 +35,8 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 TARGET = "pm25"
 
-# Enhanced feature set (v2)
+# Enhanced feature set (v2). `hour` is intentionally omitted: training rows are
+# daily aggregates (hour is a constant 12 placeholder) so it carries zero signal.
 FEATURES = [
     # Weather (now includes wind_speed + precipitation)
     "humidity", "temperature", "pressure", "wind_speed", "precipitation",
@@ -46,7 +47,7 @@ FEATURES = [
     # Spatial
     "latitude", "longitude",
     # Temporal (raw)
-    "month", "hour", "dow", "day_of_year",
+    "month", "dow", "day_of_year",
     # Cyclical temporal encoding
     "month_sin", "month_cos",
     "dow_sin", "dow_cos",
@@ -71,31 +72,53 @@ def load_data():
     print("LOADING AND ENGINEERING FEATURES")
     print("=" * 70)
 
-    # Load main training data
-    print("\nLoading p2_processed.xls...")
-    df = load_file(os.path.join(DATA_DIR, "p2_processed.xls"))
+    # Load main training data. Prefer the v2 file (408k rows / 467 sensors /
+    # 2021-2026) produced by pipeline/08_finish_pull.py; fall back to the old
+    # 61k-row file if v2 isn't present yet.
+    v2_path = os.path.join(DATA_DIR, "p2_processed_v2.xls")
+    legacy_path = os.path.join(DATA_DIR, "p2_processed.xls")
+    src_path = v2_path if os.path.exists(v2_path) else legacy_path
+    print(f"\nLoading {os.path.basename(src_path)}...")
+    df = load_file(src_path)
     print(f"  Raw rows: {len(df)}, columns: {len(df.columns)}")
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date", TARGET])
 
-    # ── Merge wind speed + precipitation from historical weather ──
+    # ── Wind speed + precipitation source resolution ──
+    # The v2 dataset (p2_processed_v2.xls from pipeline/08_finish_pull.py) already
+    # contains unit-normalized wind_speed (m/s) and precipitation. The legacy
+    # historical_weather.csv has stale km/h wind from an earlier Open-Meteo pull,
+    # so merging it would clobber the corrected units. Only fall back to it when
+    # the loaded data is missing these columns (i.e., the old p2_processed.xls).
+    v2_has_wind = "wind_speed" in df.columns and df["wind_speed"].notna().any()
+    v2_has_precip = "precipitation" in df.columns and df["precipitation"].notna().any()
     weather_path = os.path.join(PIPELINE_DIR, "historical_weather.csv")
-    if os.path.exists(weather_path):
+
+    if v2_has_wind and v2_has_precip:
+        print("Using v2 wind_speed (m/s) + precipitation already in dataset; "
+              "skipping historical_weather.csv merge.")
+        df["wind_speed"] = df["wind_speed"].fillna(0.0)
+        df["precipitation"] = df["precipitation"].fillna(0.0)
+        if "wind_gusts" not in df.columns:
+            df["wind_gusts"] = 0.0
+        df["wind_gusts"] = df["wind_gusts"].fillna(0.0)
+        print(f"  Wind speed: mean={df['wind_speed'].mean():.2f} m/s, "
+              f"non-zero={(df['wind_speed']>0).sum()}/{len(df)}")
+        print(f"  Precipitation: mean={df['precipitation'].mean():.2f}")
+    elif os.path.exists(weather_path):
         print("Loading historical weather (wind + precipitation)...")
         weather = pd.read_csv(weather_path)
         weather["date"] = pd.to_datetime(weather["date"])
         weather["sensor_id"] = weather["sensor_id"].astype(str)
         df["sensor_id"] = df["sensor_id"].astype(str)
 
-        # Merge on sensor_id + date
         df = df.merge(
             weather[["sensor_id", "date", "wind_speed", "precipitation", "wind_gusts"]],
             on=["sensor_id", "date"],
             how="left",
             suffixes=("", "_hist"),
         )
-        # Use historical wind_speed if not already present
         if "wind_speed_hist" in df.columns:
             df["wind_speed"] = df["wind_speed_hist"].fillna(df.get("wind_speed", 0))
             df.drop(columns=["wind_speed_hist"], inplace=True, errors="ignore")
@@ -110,7 +133,7 @@ def load_data():
               f"non-zero={(df['wind_speed']>0).sum()}/{len(df)}")
         print(f"  Precipitation: mean={df['precipitation'].mean():.2f}")
     else:
-        print("WARNING: historical_weather.csv not found. wind_speed/precipitation = 0")
+        print("WARNING: no wind/precipitation source found. Defaulting to 0.")
         df["wind_speed"] = 0.0
         df["precipitation"] = 0.0
 
@@ -173,10 +196,13 @@ def train_ensemble(X_train, y_train, verbose=True):
 
     if verbose:
         print("Training LightGBM (800 rounds, tuned)...")
+    # num_leaves bumped 63 -> 127: at 63 the model was 100% leaf-saturated and
+    # couldn't absorb the 6.7x larger v2 dataset. 127 ~doubles LGBM size (4.4 MB
+    # -> ~9 MB on disk, ~10 MB in RAM) — comfortably within Render's 512 MB cap.
     models["lgbm"] = lgb.LGBMRegressor(
         n_estimators=800,
         learning_rate=0.03,
-        num_leaves=63,
+        num_leaves=127,
         max_depth=8,
         min_child_samples=10,
         subsample=0.8,

@@ -69,8 +69,13 @@ EFFECTIVE_BUDGET = TOTAL_BUDGET - SAFETY_RESERVE
 PA_HISTORY_FIELDS = ["pm2.5_atm"]
 
 # QC thresholds: PM2.5 outside this range is sensor noise / fault.
+# 200 µg/m³ is past EPA "Hazardous" (250.4+ AQI) and at the upper edge of
+# PurpleAir PA-II's well-calibrated regime; values above 200 are mostly nonlinear
+# sensor saturation, not real ambient PM. Keep wildfire/dust/fireworks events.
 PM25_MIN_VALID = 0.0
-PM25_MAX_VALID = 500.0  # 500 µg/m³ is well past hazardous — beyond this = sensor fault.
+PM25_MAX_VALID = 200.0
+# Per-sensor robust-z MAD threshold (see pipeline/08_finish_pull.py for context).
+PM25_MAD_Z_MAX = 20.0
 
 # Open-Meteo archive endpoint
 OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -298,6 +303,11 @@ def fetch_open_meteo(lat: float, lon: float, start: date, end: date) -> Optional
             end_date=end.isoformat(),
             daily=",".join(OPEN_METEO_DAILY_FIELDS),
             timezone="UTC",
+            # Match NASA POWER's units so a re-pull yields a consistent dataset.
+            # Open-Meteo defaults to kmh/celsius/mm — we force ms/celsius/mm.
+            wind_speed_unit="ms",
+            temperature_unit="celsius",
+            precipitation_unit="mm",
         )
         attempts = 0
         while True:
@@ -392,15 +402,15 @@ def quality_filter(df: pd.DataFrame) -> pd.DataFrame:
     n1 = len(df)
     print(f"[qc] removed {n0-n1} rows for hard PM2.5 limits ({n0} → {n1})")
 
-    # Per-sensor robust outlier removal (median ± 6 * MAD)
+    # Per-sensor robust outlier removal (median ± PM25_MAD_Z_MAX * MAD).
     grp = df.groupby("sensor_id")["pm2.5_atm"]
     med = grp.transform("median")
     mad = grp.transform(lambda x: (x - x.median()).abs().median())
     mad = mad.replace(0, mad[mad > 0].median() if (mad > 0).any() else 1.0)
     z = (df["pm2.5_atm"] - med).abs() / (1.4826 * mad)
-    df = df[z < 6]
+    df = df[z < PM25_MAD_Z_MAX]
     n2 = len(df)
-    print(f"[qc] removed {n1-n2} per-sensor outliers (>6 MAD) ({n1} → {n2})")
+    print(f"[qc] removed {n1-n2} per-sensor outliers (>{PM25_MAD_Z_MAX:g} MAD) ({n1} → {n2})")
 
     # Drop sensors with too few rows
     counts = df.groupby("sensor_id").size()

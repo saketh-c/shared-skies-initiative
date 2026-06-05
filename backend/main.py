@@ -166,6 +166,50 @@ def _enrich_tract_lookup_with_distances(df: pd.DataFrame) -> None:
           f"dist_to_coast median={np.median(df['dist_to_coast'].values):.1f} km, "
           f"dist_to_urban median={np.median(df['dist_to_urban'].values):.1f} km")
 
+    # ── Neighbor-PM features (v3): use training-time per-sensor recent means as
+    # the inference-time proxy for "same-day mean PM2.5 of neighbors within 50km."
+    # See pipeline/03_train_enhanced.py for the training-time computation.
+    nbr_path = os.path.join(ROOT, "models", "sensor_recent_pm.json")
+    if os.path.exists(nbr_path):
+        try:
+            with open(nbr_path) as f:
+                sensors_meta = json.load(f)
+            sn = np.array([(s["lat"], s["lon"], s["recent_mean_pm25"]) for s in sensors_meta])
+            s_lats_n, s_lons_n, s_pm = sn[:, 0], sn[:, 1], sn[:, 2]
+            # For each tract: find sensors within 50km, take mean PM. Vectorize per tract.
+            radius_km = 50.0
+            nbr_mean = np.zeros(len(df))
+            nbr_count = np.zeros(len(df), dtype=np.int32)
+            nbr_std = np.zeros(len(df))
+            grand_mean = float(np.mean(s_pm))
+            for i in range(len(df)):
+                d = _haversine_km_np(lats[i], lons[i], s_lats_n, s_lons_n)
+                within = d <= radius_km
+                cnt = int(within.sum())
+                nbr_count[i] = cnt
+                if cnt > 0:
+                    vals = s_pm[within]
+                    nbr_mean[i] = float(vals.mean())
+                    nbr_std[i] = float(vals.std()) if cnt > 1 else 0.0
+                else:
+                    nbr_mean[i] = grand_mean
+                    nbr_std[i] = 0.0
+            df["nbr_pm25_50km"] = nbr_mean
+            df["nbr_count_50km"] = nbr_count
+            df["nbr_std_50km"] = nbr_std
+            print(f"  nbr_pm25_50km: median={np.median(nbr_mean):.2f} µg/m³, "
+                  f"coverage={(nbr_count>0).sum()/len(df)*100:.1f}%")
+        except Exception as e:
+            print(f"  WARNING: failed to load {nbr_path}: {e}; filling 0")
+            df["nbr_pm25_50km"] = 0.0
+            df["nbr_count_50km"] = 0
+            df["nbr_std_50km"] = 0.0
+    else:
+        # Pre-v3 deployment — model doesn't use these features. Backend's
+        # run_predictions_batch only picks features the bundle requests, so
+        # leaving them off costs nothing.
+        print(f"  no {os.path.basename(nbr_path)} (pre-v3 model); skipping neighbor features")
+
 
 def _save_snapshot(path: str, data: dict) -> None:
     """Write a cached API response to disk so cold starts can serve it instantly."""

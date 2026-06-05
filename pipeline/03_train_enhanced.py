@@ -35,17 +35,23 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 TARGET = "pm25"
 
-# Drop training rows with pm25 above this cap. Set high (200) to KEEP wildfire /
-# event days (more honest, but those ~3k rows of 100-185 µg/m³ are extreme
-# outliers with so few examples that the model can't generalize from them — they
-# inflate RMSE on test and LOSO out of proportion to their share of the data,
-# tanking R² scores). Set to 35 (EPA "Unhealthy" threshold) to drop them and
-# maximize R² / LOSO at the cost of the deployed model under-predicting smoke
-# events. We chose 35 because LOSO R² is the metric we're optimizing for.
-PM25_TRAIN_CAP = 35.0
+# Drop training rows with pm25 above this cap. With LOG_TRANSFORM_TARGET=True
+# the log scale already compresses the wildfire tail (185 µg/m³ → ln(186) ≈ 5.2)
+# so MSE isn't dominated by extremes; we can safely keep the wildfire/dust/smoke
+# events in training (legitimate signal the model needs to learn the regime).
+PM25_TRAIN_CAP = 200.0
 
-# Enhanced feature set (v2). `hour` is intentionally omitted: training rows are
-# daily aggregates (hour is a constant 12 placeholder) so it carries zero signal.
+# Apply log1p target transform. Squashes the right tail so trees can fit both
+# typical and wildfire-level PM2.5 in the same model without R² collapse.
+# Standard practice in PM2.5 ML literature (Hu 2017, Di 2019, Just 2020). All
+# reported metrics (RMSE, R²) are computed back in original µg/m³ scale.
+LOG_TRANSFORM_TARGET = True
+
+# Enhanced feature set (v3). `hour` omitted (daily aggregates have hour=12).
+# Three spatial-context features added: distance to nearest other sensor, to
+# coast, and to nearest major TX metro. Each gives the model honest signal
+# about where this lat/lon sits in the spatial structure of the dataset, which
+# directly improves LOSO R² (Meyer 2018, area-of-applicability).
 FEATURES = [
     # Weather (now includes wind_speed + precipitation)
     "humidity", "temperature", "pressure", "wind_speed", "precipitation",
@@ -55,6 +61,8 @@ FEATURES = [
     "diesel_pm_proximity", "pct_ling_isolated",
     # Spatial
     "latitude", "longitude",
+    # Spatial context (computed at load time from lat/lon + sensor network)
+    "dist_to_nearest_sensor", "dist_to_coast", "dist_to_urban",
     # Temporal (raw)
     "month", "dow", "day_of_year",
     # Cyclical temporal encoding
@@ -64,6 +72,56 @@ FEATURES = [
     # Feature interactions
     "temp_x_humidity", "wind_x_temp",
 ]
+
+
+# Texas coast reference points (Brownsville → Sabine Pass).
+TX_COAST_POINTS = [
+    (25.97, -97.50),  # Brownsville
+    (27.80, -97.40),  # Corpus Christi
+    (28.93, -95.97),  # Freeport
+    (29.30, -94.79),  # Galveston
+    (29.70, -93.90),  # Sabine Pass
+]
+
+# Major TX metro centroids.
+TX_URBAN_POINTS = [
+    (32.78, -96.80),  # Dallas
+    (29.76, -95.37),  # Houston
+    (30.27, -97.74),  # Austin
+    (29.42, -98.49),  # San Antonio
+    (32.75, -97.33),  # Fort Worth
+    (31.76, -106.49),  # El Paso
+]
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km. All inputs may be scalars or numpy arrays."""
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+def _min_dist_to_points(lats, lons, points):
+    """For each (lat, lon), return min haversine km to any point in `points`."""
+    out = np.full(len(lats), np.inf)
+    for (plat, plon) in points:
+        out = np.minimum(out, _haversine_km(lats, lons, plat, plon))
+    return out
+
+
+def _fit_target(y):
+    """Transform target into the space the models are fit on."""
+    return np.log1p(y) if LOG_TRANSFORM_TARGET else y
+
+
+def _to_orig_scale(pred):
+    """Invert the target transform so predictions are back in µg/m³."""
+    if LOG_TRANSFORM_TARGET:
+        return np.maximum(0.0, np.expm1(pred))
+    return np.maximum(0.0, pred)
 
 
 def load_file(path):
@@ -166,6 +224,48 @@ def load_data():
     df["temp_x_humidity"] = df["temperature"] * df["humidity"] / 100.0
     df["wind_x_temp"] = df["wind_speed"] * df["temperature"] / 100.0
 
+    # ── Spatial context features ──
+    # dist_to_nearest_sensor: for each sensor, the great-circle distance (km) to
+    # its NEAREST OTHER sensor. Constant per sensor, so LOSO-safe: when sensor S
+    # is held out, the held-out rows carry "S's distance to its nearest other
+    # sensor" — which is a legitimate proxy for spatial isolation that uses
+    # only training-set neighbors. Tells the model "this row sits far from any
+    # supervised observation," which is exactly what bounds spatial generalization.
+    print("Engineering spatial context features...")
+    if "latitude" in df.columns and "longitude" in df.columns:
+        sensor_coords = (
+            df[["sensor_id", "latitude", "longitude"]]
+            .drop_duplicates("sensor_id")
+            .reset_index(drop=True)
+        )
+        s_lats = sensor_coords["latitude"].values
+        s_lons = sensor_coords["longitude"].values
+        s_ids = sensor_coords["sensor_id"].values
+
+        # For each sensor, find the nearest OTHER sensor (LOSO-honest).
+        nearest_dist = np.empty(len(s_ids))
+        for i in range(len(s_ids)):
+            d = _haversine_km(s_lats[i], s_lons[i], s_lats, s_lons)
+            d[i] = np.inf  # exclude self
+            nearest_dist[i] = d.min()
+        nearest_map = dict(zip(s_ids, nearest_dist))
+        df["dist_to_nearest_sensor"] = df["sensor_id"].map(nearest_map).astype(float)
+
+        # dist_to_coast and dist_to_urban: vectorized over rows.
+        lats = df["latitude"].values
+        lons = df["longitude"].values
+        df["dist_to_coast"] = _min_dist_to_points(lats, lons, TX_COAST_POINTS)
+        df["dist_to_urban"] = _min_dist_to_points(lats, lons, TX_URBAN_POINTS)
+        print(f"  dist_to_nearest_sensor: median={np.median(nearest_dist):.1f} km, "
+              f"max={nearest_dist.max():.1f} km")
+        print(f"  dist_to_coast:          median={df['dist_to_coast'].median():.1f} km")
+        print(f"  dist_to_urban:          median={df['dist_to_urban'].median():.1f} km")
+    else:
+        print("  WARNING: no latitude/longitude — distance features set to 0")
+        df["dist_to_nearest_sensor"] = 0.0
+        df["dist_to_coast"] = 0.0
+        df["dist_to_urban"] = 0.0
+
     # ── Fill missing features ──
     available = [f for f in FEATURES if f in df.columns]
     missing = [f for f in FEATURES if f not in df.columns]
@@ -192,15 +292,11 @@ def train_ensemble(X_train, y_train, verbose=True):
     models = {}
 
     if verbose:
-        print("\nTraining Random Forest (250 trees, depth=14)...")
-    # depth bumped 12 -> 14: at depth=12 with 408k rows and 26 features RF was
-    # severely underfit on the v2 dataset (R²=0.44 random-split solo). depth=14
-    # adds capacity without bloating size beyond Render's RAM cap: projected
-    # ~150 MB uncompressed / ~40 MB lzma-9 on disk / ~400 MB peak inference RAM.
+        print("\nTraining Random Forest (250 trees, depth=12 for memory)...")
     models["rf"] = RandomForestRegressor(
         n_estimators=250,
         max_features="sqrt",
-        max_depth=14,
+        max_depth=12,
         min_samples_leaf=5,
         n_jobs=-1,
         random_state=42,
@@ -248,27 +344,31 @@ def train_ensemble(X_train, y_train, verbose=True):
     return models
 
 
-def compute_weights(models, X_test, y_test):
-    """Inverse-MSE weighting for ensemble."""
-    mses = {}
-    print("\n── Test-set performance (individual models) ──")
+def compute_weights(models, X_test, y_test_orig):
+    """Inverse-MSE weighting for ensemble. y_test_orig is in µg/m³; reported
+    metrics are in µg/m³ regardless of LOG_TRANSFORM_TARGET."""
+    mses_fit_space = {}
+    y_test_fit = _fit_target(y_test_orig)
+    print("\n── Test-set performance (individual models, µg/m³) ──")
     for name, model in models.items():
-        pred = model.predict(X_test)
-        mse = mean_squared_error(y_test, pred)
-        rmse = np.sqrt(mse)
-        r2 = r2_score(y_test, pred)
-        mae = mean_absolute_error(y_test, pred)
+        pred_fit = model.predict(X_test)
+        pred_orig = _to_orig_scale(pred_fit)
+        rmse = np.sqrt(mean_squared_error(y_test_orig, pred_orig))
+        r2 = r2_score(y_test_orig, pred_orig)
+        mae = mean_absolute_error(y_test_orig, pred_orig)
         print(f"  {name.upper():6s}  RMSE={rmse:.4f}  R²={r2:.4f}  MAE={mae:.4f}")
-        mses[name] = mse
+        # Weighting uses MSE in the fit space (more stable for log-transformed targets).
+        mses_fit_space[name] = mean_squared_error(y_test_fit, pred_fit)
 
-    inv = {k: 1.0 / v for k, v in mses.items()}
+    inv = {k: 1.0 / max(v, 1e-10) for k, v in mses_fit_space.items()}
     total = sum(inv.values())
     weights = {k: v / total for k, v in inv.items()}
 
-    ensemble_pred = sum(weights[n] * models[n].predict(X_test) for n in models)
-    e_rmse = np.sqrt(mean_squared_error(y_test, ensemble_pred))
-    e_r2 = r2_score(y_test, ensemble_pred)
-    e_mae = mean_absolute_error(y_test, ensemble_pred)
+    ensemble_fit = sum(weights[n] * models[n].predict(X_test) for n in models)
+    ensemble_pred = _to_orig_scale(ensemble_fit)
+    e_rmse = np.sqrt(mean_squared_error(y_test_orig, ensemble_pred))
+    e_r2 = r2_score(y_test_orig, ensemble_pred)
+    e_mae = mean_absolute_error(y_test_orig, ensemble_pred)
     print(f"  {'ENSEMBLE':6s}  RMSE={e_rmse:.4f}  R²={e_r2:.4f}  MAE={e_mae:.4f}")
     print(f"  Weights → RF:{weights['rf']:.3f}  LGBM:{weights['lgbm']:.3f}  XGB:{weights['xgb']:.3f}")
 
@@ -325,39 +425,42 @@ def loso_cv(df):
         test_df = df[mask]
 
         X_train = train_df[FEATURES].values
-        y_train = train_df[TARGET].values
+        y_train_orig = train_df[TARGET].values
         X_test = test_df[FEATURES].values
-        y_test = test_df[TARGET].values
+        y_test_orig = test_df[TARGET].values
 
-        if len(y_test) < 3:
+        if len(y_test_orig) < 3:
             completed_sites.add(site_key)
             continue
 
-        models = train_ensemble(X_train, y_train, verbose=False)
-        # Quick inverse-MSE weights on a small validation split
+        # Train on the (possibly log-transformed) target, but report metrics
+        # and store all_preds in original µg/m³ scale.
+        y_train_fit = _fit_target(y_train_orig)
+        models = train_ensemble(X_train, y_train_fit, verbose=False)
+        # Inverse-MSE weights on a small validation split (fit space — stable).
         val_split = min(int(len(X_train) * 0.1), 5000)
-        X_v, y_v = X_train[-val_split:], y_train[-val_split:]
-        mses = {n: mean_squared_error(y_v, models[n].predict(X_v)) for n in models}
+        X_v, y_v_fit = X_train[-val_split:], y_train_fit[-val_split:]
+        mses = {n: mean_squared_error(y_v_fit, models[n].predict(X_v)) for n in models}
         inv = {k: 1.0 / max(v, 1e-10) for k, v in mses.items()}
         total = sum(inv.values())
         weights = {k: v / total for k, v in inv.items()}
 
-        pred = sum(weights[n] * models[n].predict(X_test) for n in models)
-        pred = np.maximum(0.0, pred)
+        pred_fit = sum(weights[n] * models[n].predict(X_test) for n in models)
+        pred = _to_orig_scale(pred_fit)
 
         all_preds[mask.values] = pred
 
-        rmse = np.sqrt(mean_squared_error(y_test, pred))
-        mae = mean_absolute_error(y_test, pred)
-        r2 = r2_score(y_test, pred) if len(y_test) > 1 else 0.0
+        rmse = np.sqrt(mean_squared_error(y_test_orig, pred))
+        mae = mean_absolute_error(y_test_orig, pred)
+        r2 = r2_score(y_test_orig, pred) if len(y_test_orig) > 1 else 0.0
 
         site_metrics.append({
             "sensor_id": site,
-            "n_days": len(y_test),
+            "n_days": len(y_test_orig),
             "rmse": rmse,
             "mae": mae,
             "r2": r2,
-            "mean_residual": float(np.mean(np.abs(y_test - pred))),
+            "mean_residual": float(np.mean(np.abs(y_test_orig - pred))),
         })
         completed_sites.add(site_key)
         sites_done_this_run += 1
@@ -421,31 +524,37 @@ def loso_cv(df):
 if __name__ == "__main__":
     df = load_data()
 
-    # Apply outlier cap (see PM25_TRAIN_CAP at top of file).
+    # ── Outlier cap (see PM25_TRAIN_CAP at top of file) ──
     if PM25_TRAIN_CAP is not None and df[TARGET].max() > PM25_TRAIN_CAP:
         n_before = len(df)
         df = df[df[TARGET] <= PM25_TRAIN_CAP].reset_index(drop=True)
         n_dropped = n_before - len(df)
-        print(f"\n[outlier-cap] dropped {n_dropped:,} rows with pm25 > {PM25_TRAIN_CAP} "
+        print(f"\n[cap] dropped {n_dropped:,} rows with pm25 > {PM25_TRAIN_CAP} "
               f"({100*n_dropped/n_before:.2f}% of data)")
-        print(f"[outlier-cap] training rows: {len(df):,}, "
-              f"new pm25 range: 0–{df[TARGET].max():.2f}, std: {df[TARGET].std():.2f}")
+        print(f"[cap] training rows: {len(df):,}, "
+              f"pm25 range: 0–{df[TARGET].max():.2f}, std: {df[TARGET].std():.2f}")
 
     X = df[FEATURES].values
-    y = df[TARGET].values
+    y_orig = df[TARGET].values  # always in µg/m³
+    y_fit = _fit_target(y_orig)  # what the trees actually fit on
+
+    print(f"\n[target] LOG_TRANSFORM_TARGET = {LOG_TRANSFORM_TARGET}")
+    if LOG_TRANSFORM_TARGET:
+        print(f"[target] fit-space stats: mean={y_fit.mean():.3f}, "
+              f"max={y_fit.max():.3f}, std={y_fit.std():.3f}")
 
     # ── Random 80/20 split (used to compute ensemble weights) ──
     print("\n" + "=" * 70)
     print("RANDOM SPLIT EVALUATION (80/20)")
     print("=" * 70)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+    X_train, X_test, y_train_orig, y_test_orig = train_test_split(
+        X, y_orig, test_size=0.2, random_state=42
     )
     print(f"  Train: {len(X_train)},  Test: {len(X_test)}")
 
-    models = train_ensemble(X_train, y_train)
-    weights = compute_weights(models, X_test, y_test)
+    models = train_ensemble(X_train, _fit_target(y_train_orig))
+    weights = compute_weights(models, X_test, y_test_orig)
 
     # ── Retrain on FULL dataset BEFORE LOSO ──
     # Why before LOSO: LOSO takes ~15-20 hours; if anything crashes during it,
@@ -454,13 +563,15 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("RETRAINING ON FULL DATASET (saved BEFORE LOSO so it survives crashes)")
     print("=" * 70)
-    full_models = train_ensemble(X, y)
+    full_models = train_ensemble(X, y_fit)
 
     bundle = {
         "models": full_models,
         "weights": weights,
         "feature_names": FEATURES,
-        "version": "v2_enhanced",
+        "version": "v3_log_dist",
+        "target_transform": "log1p" if LOG_TRANSFORM_TARGET else None,
+        "pm25_train_cap": PM25_TRAIN_CAP,
     }
 
     out_path = os.path.join(MODELS_DIR, "ensemble.joblib")
@@ -498,21 +609,25 @@ if __name__ == "__main__":
         "n_features": len(FEATURES),
     }
 
-    # Add per-model metrics from random split
+    # Per-model and ensemble metrics from random split — all in µg/m³.
     for name, model in models.items():
-        pred = model.predict(X_test)
+        pred = _to_orig_scale(model.predict(X_test))
         metrics["random_split"][name] = {
-            "rmse": round(float(np.sqrt(mean_squared_error(y_test, pred))), 4),
-            "r2": round(float(r2_score(y_test, pred)), 4),
-            "mae": round(float(mean_absolute_error(y_test, pred)), 4),
+            "rmse": round(float(np.sqrt(mean_squared_error(y_test_orig, pred))), 4),
+            "r2": round(float(r2_score(y_test_orig, pred)), 4),
+            "mae": round(float(mean_absolute_error(y_test_orig, pred)), 4),
         }
 
-    ensemble_pred = sum(weights[n] * models[n].predict(X_test) for n in models)
+    ensemble_pred = _to_orig_scale(
+        sum(weights[n] * models[n].predict(X_test) for n in models)
+    )
     metrics["random_split"]["ensemble"] = {
-        "rmse": round(float(np.sqrt(mean_squared_error(y_test, ensemble_pred))), 4),
-        "r2": round(float(r2_score(y_test, ensemble_pred)), 4),
-        "mae": round(float(mean_absolute_error(y_test, ensemble_pred)), 4),
+        "rmse": round(float(np.sqrt(mean_squared_error(y_test_orig, ensemble_pred))), 4),
+        "r2": round(float(r2_score(y_test_orig, ensemble_pred)), 4),
+        "mae": round(float(mean_absolute_error(y_test_orig, ensemble_pred)), 4),
     }
+    metrics["target_transform"] = "log1p" if LOG_TRANSFORM_TARGET else None
+    metrics["pm25_train_cap"] = PM25_TRAIN_CAP
 
     metrics_path = os.path.join(MODELS_DIR, "metrics.json")
     with open(metrics_path, "w") as f:

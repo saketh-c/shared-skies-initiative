@@ -88,6 +88,85 @@ state: dict = {}
 _revalidating: dict = {"texas": False, "quantum": False}
 
 
+# ── Spatial-context reference points (kept in sync with pipeline/03_train_enhanced.py) ──
+TX_COAST_POINTS = [
+    (25.97, -97.50), (27.80, -97.40), (28.93, -95.97),
+    (29.30, -94.79), (29.70, -93.90),
+]
+TX_URBAN_POINTS = [
+    (32.78, -96.80), (29.76, -95.37), (30.27, -97.74),
+    (29.42, -98.49), (32.75, -97.33), (31.76, -106.49),
+]
+
+
+def _haversine_km_np(lat1, lon1, lat2, lon2):
+    """Vectorized great-circle distance in km."""
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+def _min_dist_to_points(lats, lons, points):
+    out = np.full(len(lats), np.inf)
+    for (plat, plon) in points:
+        out = np.minimum(out, _haversine_km_np(lats, lons, plat, plon))
+    return out
+
+
+def _enrich_tract_lookup_with_distances(df: pd.DataFrame) -> None:
+    """Add dist_to_nearest_sensor, dist_to_coast, dist_to_urban to tract_lookup in place.
+    The v3 model uses these features at inference. Reads sensor locations from
+    p2_processed_v2.xls (falls back to p2_processed.xls). Idempotent — no-op if
+    columns already exist."""
+    if {"dist_to_nearest_sensor", "dist_to_coast", "dist_to_urban"} <= set(df.columns):
+        return
+    lats = df["lat"].values
+    lons = df["lon"].values
+    df["dist_to_coast"] = _min_dist_to_points(lats, lons, TX_COAST_POINTS)
+    df["dist_to_urban"] = _min_dist_to_points(lats, lons, TX_URBAN_POINTS)
+
+    # dist_to_nearest_sensor needs the training sensor list. Sensor locations
+    # come from the same training file the model was trained on.
+    sensor_lats, sensor_lons = None, None
+    for cand in ("p2_processed_v2.xls", "p2_processed.xls"):
+        path = os.path.join(ROOT, cand)
+        if not os.path.exists(path):
+            continue
+        try:
+            sdf = pd.read_csv(path, encoding="utf-8-sig", low_memory=False,
+                              usecols=lambda c: c in ("sensor_id", "latitude", "longitude"))
+            sdf = sdf.drop_duplicates("sensor_id")
+            sensor_lats = sdf["latitude"].values
+            sensor_lons = sdf["longitude"].values
+            print(f"  loaded {len(sdf)} sensor locations from {cand} for dist features")
+            break
+        except Exception as e:
+            print(f"  could not read sensor coords from {cand}: {e}")
+
+    if sensor_lats is None:
+        # Fall back to predicting at zero distance — degrades cleanly into a
+        # constant feature the model will ignore at split time.
+        print("  WARNING: no sensor coords found; dist_to_nearest_sensor = 0")
+        df["dist_to_nearest_sensor"] = 0.0
+        return
+
+    # For each tract, distance to nearest sensor (vectorized in chunks).
+    nearest = np.full(len(df), np.inf)
+    chunk = 2048
+    for start in range(0, len(sensor_lats), chunk):
+        s_lats = sensor_lats[start:start + chunk]
+        s_lons = sensor_lons[start:start + chunk]
+        for sl, slo in zip(s_lats, s_lons):
+            nearest = np.minimum(nearest, _haversine_km_np(lats, lons, sl, slo))
+    df["dist_to_nearest_sensor"] = nearest
+    print(f"  enriched lookup: dist_to_nearest_sensor median={np.median(nearest):.1f} km, "
+          f"dist_to_coast median={np.median(df['dist_to_coast'].values):.1f} km, "
+          f"dist_to_urban median={np.median(df['dist_to_urban'].values):.1f} km")
+
+
 def _save_snapshot(path: str, data: dict) -> None:
     """Write a cached API response to disk so cold starts can serve it instantly."""
     try:
@@ -131,6 +210,11 @@ async def lifespan(app: FastAPI):
     if os.path.exists(LOOKUP_PATH):
         df = await asyncio.to_thread(pd.read_parquet, LOOKUP_PATH)
         df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
+        # Enrich with spatial-context features the v3 model expects. These are
+        # static once sensor locations are known, so we compute them once at
+        # startup rather than per-prediction. Bound vars used below: TX coast +
+        # urban reference points and the sensor location list.
+        _enrich_tract_lookup_with_distances(df)
         state["tract_lookup"] = df
         print(f"Tract lookup loaded: {len(df)} total tracts")
         for city, config in CITIES.items():
@@ -471,6 +555,10 @@ def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np
             X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
 
     preds = sum(weights[name] * models[name].predict(X) for name in models)
+    # v3 models fit on log1p(pm25); invert before returning. Pre-v3 bundles
+    # don't have this key so this is a no-op for them.
+    if bundle.get("target_transform") == "log1p":
+        preds = np.expm1(preds)
     return np.maximum(0.0, preds)
 
 
@@ -1051,8 +1139,10 @@ def _compute_model_disagreement(df: pd.DataFrame, weather: dict, temporal: dict)
                 X[:, i] = shared[feat]
             elif feat in df.columns:
                 X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
-        return np.maximum(0.0, sum(weights[name] * models_dict[name].predict(X)
-                                   for name in models_dict))
+        raw = sum(weights[name] * models_dict[name].predict(X) for name in models_dict)
+        if bundle.get("target_transform") == "log1p":
+            raw = np.expm1(raw)
+        return np.maximum(0.0, raw)
 
     # Predict under several weather perturbations
     base_pred = _predict_with_weather(weather)

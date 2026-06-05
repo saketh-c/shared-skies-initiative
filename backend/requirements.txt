@@ -5,7 +5,9 @@ numpy
 scikit-learn
 lightgbm
 xgboost
-catboost
+# Pin catboost to the version the v3b ensemble.joblib was trained with — keeps
+# pickle compat stable across Render rebuilds. ~97 MB prebuilt cp311 wheel.
+catboost==1.2.10
 joblib
 pyarrow
 httpx
@@ -14,6 +16,7 @@ xlrd
 dwave-neal
 dimod
 networkx
-# NOAA HMS smoke polygon parsing — pure-Python (no GDAL dependency)
-pyshp
-shapely
+# NOAA HMS smoke polygon parsing — pure-Python (no GDAL dependency).
+# shapely 2.x manylinux wheel bundles GEOS so no apt deps needed on Render.
+pyshp==2.3.1
+shapely==2.1.2

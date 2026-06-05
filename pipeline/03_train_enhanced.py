@@ -267,6 +267,10 @@ def loso_cv(df):
     Leave-One-Site-Out Cross-Validation.
     For each sensor, train on all other sensors and predict for the held-out sensor.
     Returns per-site metrics and per-row residuals.
+
+    Resumable: progress is checkpointed every 20 folds to models/loso_checkpoint.joblib.
+    If the script crashes (power outage, kernel kill, etc.), simply re-run and it
+    picks up from the last checkpoint instead of restarting from fold 0.
     """
     print("\n" + "=" * 70)
     print("LEAVE-ONE-SITE-OUT CROSS-VALIDATION")
@@ -276,11 +280,33 @@ def loso_cv(df):
     n_sites = len(sites)
     print(f"  Sites: {n_sites}")
 
-    all_preds = np.full(len(df), np.nan)
-    site_metrics = []
+    checkpoint_path = os.path.join(MODELS_DIR, "loso_checkpoint.joblib")
 
+    # ── Resume from checkpoint if it exists ────────────────────────────────
+    if os.path.exists(checkpoint_path):
+        try:
+            ck = joblib.load(checkpoint_path)
+            all_preds = ck["all_preds"]
+            site_metrics = ck["site_metrics"]
+            completed_sites = set(ck["completed_sites"])
+            print(f"  Resuming from checkpoint: {len(completed_sites)}/{n_sites} sites already done")
+        except Exception as e:
+            print(f"  Checkpoint exists but failed to load ({e}). Starting fresh.")
+            all_preds = np.full(len(df), np.nan)
+            site_metrics = []
+            completed_sites = set()
+    else:
+        all_preds = np.full(len(df), np.nan)
+        site_metrics = []
+        completed_sites = set()
+
+    sites_done_this_run = 0
     t0 = time.time()
     for i, site in enumerate(sites):
+        site_key = int(site) if hasattr(site, "__int__") else site
+        if site_key in completed_sites:
+            continue
+
         mask = df["sensor_id"] == site
         train_df = df[~mask]
         test_df = df[mask]
@@ -291,6 +317,7 @@ def loso_cv(df):
         y_test = test_df[TARGET].values
 
         if len(y_test) < 3:
+            completed_sites.add(site_key)
             continue
 
         models = train_ensemble(X_train, y_train, verbose=False)
@@ -319,12 +346,33 @@ def loso_cv(df):
             "r2": r2,
             "mean_residual": float(np.mean(np.abs(y_test - pred))),
         })
+        completed_sites.add(site_key)
+        sites_done_this_run += 1
 
-        if (i + 1) % 20 == 0 or i == n_sites - 1:
+        # Checkpoint every 20 folds — atomic write so a crash mid-write can't corrupt it.
+        if sites_done_this_run % 20 == 0:
+            tmp = checkpoint_path + ".tmp"
+            joblib.dump({
+                "all_preds": all_preds,
+                "site_metrics": site_metrics,
+                "completed_sites": list(completed_sites),
+            }, tmp, compress=3)
+            os.replace(tmp, checkpoint_path)
+
+        if sites_done_this_run % 20 == 0 or len(completed_sites) == n_sites:
             elapsed = time.time() - t0
-            rate = (i + 1) / elapsed
-            eta = (n_sites - i - 1) / rate
-            print(f"  {i+1}/{n_sites} sites  ({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)")
+            rate = max(sites_done_this_run / elapsed, 1e-9)
+            remaining = n_sites - len(completed_sites)
+            eta = remaining / rate
+            print(f"  {len(completed_sites)}/{n_sites} sites  "
+                  f"({elapsed:.0f}s this run, ~{eta:.0f}s remaining)")
+
+    # Cleanup checkpoint after full success — we don't want stale data lingering.
+    if os.path.exists(checkpoint_path):
+        try:
+            os.remove(checkpoint_path)
+        except Exception:
+            pass
 
     # Overall LOSO metrics
     valid = ~np.isnan(all_preds)
@@ -363,7 +411,7 @@ if __name__ == "__main__":
     X = df[FEATURES].values
     y = df[TARGET].values
 
-    # ── Random 80/20 split ──
+    # ── Random 80/20 split (used to compute ensemble weights) ──
     print("\n" + "=" * 70)
     print("RANDOM SPLIT EVALUATION (80/20)")
     print("=" * 70)
@@ -376,16 +424,15 @@ if __name__ == "__main__":
     models = train_ensemble(X_train, y_train)
     weights = compute_weights(models, X_test, y_test)
 
-    # ── LOSO-CV ──
-    loso = loso_cv(df)
-
-    # ── Retrain on full dataset ──
+    # ── Retrain on FULL dataset BEFORE LOSO ──
+    # Why before LOSO: LOSO takes ~15-20 hours; if anything crashes during it,
+    # we still want a usable production model on disk. Saving here means even
+    # a total LOSO failure leaves you with a deployable ensemble.joblib.
     print("\n" + "=" * 70)
-    print("RETRAINING ON FULL DATASET")
+    print("RETRAINING ON FULL DATASET (saved BEFORE LOSO so it survives crashes)")
     print("=" * 70)
     full_models = train_ensemble(X, y)
 
-    # ── Save enhanced model bundle ──
     bundle = {
         "models": full_models,
         "weights": weights,
@@ -397,10 +444,13 @@ if __name__ == "__main__":
     joblib.dump(bundle, out_path)
     print(f"\nSaved enhanced model → {out_path}")
 
-    # Save feature names
+    # Save feature names early too
     feat_path = os.path.join(MODELS_DIR, "feature_names.json")
     with open(feat_path, "w") as f:
         json.dump(FEATURES, f, indent=2)
+
+    # ── LOSO-CV (resumable: checkpoints every 20 folds) ──
+    loso = loso_cv(df)
 
     # Save LOSO residuals for quantum solver
     residual_path = os.path.join(MODELS_DIR, "loso_residuals.json")

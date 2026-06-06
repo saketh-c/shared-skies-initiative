@@ -42,7 +42,7 @@ MODELS_DIR = os.path.join(ROOT, "models")
 # from same-day live readings to match training. TTL is long (3h) because the
 # model is daily-granularity and the live API is points-billed — 8 pulls/day is
 # plenty fresh and stays cheap (~$13/mo). Set PURPLEAIR_API_KEY in Render env.
-PURPLEAIR_CACHE_TTL_MIN = int(os.environ.get("PURPLEAIR_CACHE_TTL_MIN", "180"))
+PURPLEAIR_CACHE_TTL_MIN = int(os.environ.get("PURPLEAIR_CACHE_TTL_MIN", "360"))
 # Clip dist_to_nearest_sensor to the training-network max so rural tracts (which
 # can be 195km from any sensor vs the 164km training max) don't push the tree
 # models out of distribution.

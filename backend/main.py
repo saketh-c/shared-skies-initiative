@@ -671,11 +671,19 @@ def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np
     n = len(df)
     X = np.zeros((n, len(features)), dtype=np.float64)
 
+    # Use the EXACT training-time fill values for any feature missing/NaN at
+    # inference, so the model never sees a value distribution it wasn't trained
+    # on. bundle['feature_fill'] holds the training medians (and hms_smoke=0).
+    feature_fill = bundle.get("feature_fill", {})
+
     for i, feat in enumerate(features):
+        fill = float(feature_fill.get(feat, 0.0))
         if feat in shared:
             X[:, i] = shared[feat]
         elif feat in df.columns:
-            X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
+            X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(fill).values
+        else:
+            X[:, i] = fill  # feature entirely absent -> training fill, not 0
 
     preds = sum(weights[name] * models[name].predict(X) for name in models)
     # v3 models fit on log1p(pm25); invert before returning. Pre-v3 bundles
@@ -1051,6 +1059,64 @@ async def _compute_texas_predictions() -> dict:
             print("No live PurpleAir data — using static climatological neighbor features.")
     except Exception as e:
         print(f"Live neighbor recompute failed ({e}); using static neighbor features.")
+
+    # ── Live HMS smoke feature (hms_smoke) ──────────────────────────────────
+    # Compute the SAME point-in-polygon smoke density the model trained on, for
+    # every tract centroid, using today's cached HMS polygons. Uses the shared
+    # backend.hms helpers so train/inference are byte-identical. Tracts under no
+    # smoke polygon get 0 (the training fill). Only runs if the model uses it.
+    features_needed = set(state.get("bundle", {}).get("feature_names", []))
+    if "hms_smoke" in features_needed:
+        try:
+            hms_data = _hms_cache.get("data")
+            polys = []
+            if hms_data and hms_data.get("features"):
+                from backend.hms import build_density_polygons
+                polys = await asyncio.to_thread(build_density_polygons, hms_data["features"])
+            if polys:
+                from backend.hms import smoke_density_at
+                def _smoke_all(lats, lons):
+                    return np.array([smoke_density_at(polys, float(lo), float(la))
+                                     for la, lo in zip(lats, lons)], dtype=np.int16)
+                hms_vals = await asyncio.to_thread(
+                    _smoke_all, lookup_reset["lat"].values, lookup_reset["lon"].values)
+                lookup_reset = lookup_reset.copy()
+                lookup_reset["hms_smoke"] = hms_vals
+                print(f"HMS smoke feature applied: {(hms_vals>0).sum()} tracts under smoke "
+                      f"(max tier {int(hms_vals.max()) if len(hms_vals) else 0})")
+            else:
+                lookup_reset = lookup_reset.copy()
+                lookup_reset["hms_smoke"] = 0  # no polygons today = no smoke
+        except Exception as e:
+            print(f"HMS smoke feature failed ({e}); defaulting to 0.")
+            lookup_reset = lookup_reset.copy()
+            lookup_reset["hms_smoke"] = 0
+
+    # ── Live CAMS air-quality + met PBL-proxy features ──────────────────────
+    # aod/cams_pm25/dust/shortwave/et0/cloud_cover per tract, computed the SAME
+    # way as training (daily-mean of today's hourly AOD; today's daily met). Done
+    # once per cycle, batched by grid cell (~50-100 calls). Missing values fall
+    # back to the training median via run_predictions_batch's feature_fill.
+    aq_feats = {"aod", "cams_pm25", "dust", "shortwave", "et0", "cloud_cover"}
+    if aq_feats & features_needed:
+        try:
+            from backend.airquality import fetch_airquality_snapshot
+            snap = await fetch_airquality_snapshot(
+                lookup_reset["lat"].values, lookup_reset["lon"].values)
+            if snap.get("usable"):
+                lookup_reset = lookup_reset.copy()
+                applied = []
+                for f in aq_feats:
+                    vals = snap["features"].get(f)
+                    if vals is not None:
+                        # leave None -> NaN so run_predictions_batch fills with training median
+                        lookup_reset[f] = pd.Series(vals, dtype="float64").values
+                        applied.append(f)
+                print(f"Air-quality/met features applied ({snap['n_cells']} cells): {applied}")
+            else:
+                print("No usable live air-quality data — features will use training-median fill.")
+        except Exception as e:
+            print(f"Air-quality feature fetch failed ({e}); using training-median fill.")
 
     # Vectorized batch prediction — single model.predict() call for all 6,900+ tracts
     pm25_array = await asyncio.to_thread(run_predictions_batch, lookup_reset, weather, temporal)

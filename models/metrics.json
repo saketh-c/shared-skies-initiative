@@ -3,35 +3,35 @@
     "test_size": 80142,
     "train_size": 320568,
     "rf": {
-      "rmse": 3.8796,
-      "r2": 0.7552,
-      "mae": 2.4702
+      "rmse": 3.897,
+      "r2": 0.753,
+      "mae": 2.4795
     },
     "lgbm": {
-      "rmse": 2.9798,
-      "r2": 0.8556,
-      "mae": 1.6067
+      "rmse": 2.9417,
+      "r2": 0.8592,
+      "mae": 1.5899
     },
     "xgb": {
-      "rmse": 2.9922,
-      "r2": 0.8544,
-      "mae": 1.6306
+      "rmse": 2.9641,
+      "r2": 0.8571,
+      "mae": 1.6154
     },
     "cat": {
-      "rmse": 3.2258,
-      "r2": 0.8307,
-      "mae": 1.812
+      "rmse": 3.2025,
+      "r2": 0.8332,
+      "mae": 1.8052
     },
     "ensemble": {
-      "rmse": 3.0891,
-      "r2": 0.8448,
-      "mae": 1.7204
+      "rmse": 3.0602,
+      "r2": 0.8477,
+      "mae": 1.7053
     }
   },
   "loso_cv": {
-    "rmse": 4.3462,
-    "mae": 2.7353,
-    "r2": 0.6881,
+    "rmse": 4.3038,
+    "mae": 2.7048,
+    "r2": 0.6942,
     "n_sites": 427
   },
   "features": [
@@ -56,6 +56,13 @@
     "nbr_pm25_50km",
     "nbr_count_50km",
     "nbr_std_50km",
+    "hms_smoke",
+    "aod",
+    "cams_pm25",
+    "dust",
+    "shortwave",
+    "et0",
+    "cloud_cover",
     "month",
     "dow",
     "day_of_year",
@@ -68,7 +75,7 @@
     "temp_x_humidity",
     "wind_x_temp"
   ],
-  "n_features": 32,
+  "n_features": 39,
   "target_transform": null,
   "pm25_train_cap": 75.0
 }

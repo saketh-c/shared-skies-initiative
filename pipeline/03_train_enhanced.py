@@ -78,6 +78,10 @@ FEATURES = [
     # Mean / count / std of PM2.5 from OTHER sensors within 50km on the same
     # date. MEASURED lift on 50-sensor LOSO holdout: 0.40 → 0.63 (+0.23).
     "nbr_pm25_50km", "nbr_count_50km", "nbr_std_50km",
+    # NOAA HMS smoke density (exogenous satellite analyst data, LOSO-safe).
+    # Ordinal 0=none/1=light/2=medium/3=heavy from point-in-polygon. Unlocks
+    # wildfire/smoke-event prediction the model otherwise structurally lacks.
+    "hms_smoke",
     # Temporal (raw)
     "month", "dow", "day_of_year",
     # Cyclical temporal encoding
@@ -87,6 +91,28 @@ FEATURES = [
     # Feature interactions
     "temp_x_humidity", "wind_x_temp",
 ]
+
+# CAMS air-quality + met PBL-proxy features are added ONLY when their pulled
+# data files exist (pipeline/11 + 12). This lets us ship the HMS model now and
+# auto-upgrade to the full model once the rate-limited AOD/met pull completes
+# (after the Open-Meteo daily quota resets) — just re-run training.
+#   aod/cams_pm25/dust = CAMS air-quality (~40km, archive from 2022-08)
+#   shortwave/et0/cloud_cover = ERA5 boundary-layer-mixing proxies (full 2021+)
+_AQ_FEATURES = ["aod", "cams_pm25", "dust", "shortwave", "et0", "cloud_cover"]
+if (os.path.exists(os.path.join(PIPELINE_DIR, "airquality_by_cell.parquet"))
+        and os.path.exists(os.path.join(PIPELINE_DIR, "met_extra_by_cell.parquet"))):
+    _i = FEATURES.index("hms_smoke") + 1
+    FEATURES[_i:_i] = _AQ_FEATURES
+    print(f"[features] AOD+met data found — {len(FEATURES)} features (full v4).")
+else:
+    print(f"[features] No AOD+met data yet — {len(FEATURES)} features (HMS-only).")
+
+# Inference-time fallback values for each feature, exported into the model
+# bundle so the backend fills missing features with EXACTLY what training used
+# (prevents train/serve skew). hms_smoke=0 means "no smoke" (meaningful, not
+# missing). Other features fall back to their training medians, computed and
+# merged into this dict at load time.
+FEATURE_FILL = {"hms_smoke": 0}
 
 
 # Texas coast reference points (Brownsville → Sabine Pass).
@@ -363,6 +389,52 @@ def load_data():
         df["nbr_count_50km"] = 0
         df["nbr_std_50km"] = 0.0
 
+    # ── Merge exogenous feature sources (HMS smoke, CAMS air-quality, met) ──
+    # All keyed on (sensor_id, date). Normalize keys once.
+    df["sensor_id"] = df["sensor_id"].astype(str)
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+
+    # NOAA HMS smoke (pipeline/10). Missing = no smoke = 0 (meaningful).
+    hms_path = os.path.join(PIPELINE_DIR, "hms_smoke_by_sensor.parquet")
+    if os.path.exists(hms_path) and "hms_smoke" not in df.columns:
+        hms = pd.read_parquet(hms_path)
+        hms["sensor_id"] = hms["sensor_id"].astype(str)
+        hms["date"] = pd.to_datetime(hms["date"]).dt.normalize()
+        df = df.merge(hms, on=["sensor_id", "date"], how="left")
+        df["hms_smoke"] = df["hms_smoke"].fillna(0).astype("int16")
+        nz = (df["hms_smoke"] > 0).sum()
+        print(f"  HMS smoke merged: {nz:,}/{len(df):,} rows with smoke "
+              f"({100*nz/len(df):.1f}%); tiers={dict(df['hms_smoke'].value_counts().sort_index())}")
+
+    # Grid-cell features (pipeline/11 + 12) are keyed on (cell_lat, cell_lon,
+    # date). Map each sensor to its 0.5deg cell (SAME grid as backend inference)
+    # and merge. Archive AOD starts ~2022-08, so pre-2022-08 rows are NaN ->
+    # median-filled below (same median exported to the bundle for inference parity).
+    GRID_DEG = 2.0
+    if "latitude" in df.columns and "longitude" in df.columns:
+        df["cell_lat"] = (df["latitude"] / GRID_DEG).round() * GRID_DEG
+        df["cell_lon"] = (df["longitude"] / GRID_DEG).round() * GRID_DEG
+
+        aq_path = os.path.join(PIPELINE_DIR, "airquality_by_cell.parquet")
+        if os.path.exists(aq_path) and "aod" not in df.columns:
+            aq = pd.read_parquet(aq_path)
+            aq["date"] = pd.to_datetime(aq["date"]).dt.normalize()
+            df = df.merge(aq, on=["cell_lat", "cell_lon", "date"], how="left")
+            for c in ["aod", "cams_pm25", "dust"]:
+                if c in df.columns:
+                    print(f"  {c} merged: {df[c].notna().mean()*100:.1f}% coverage (rest median-filled)")
+
+        met_path = os.path.join(PIPELINE_DIR, "met_extra_by_cell.parquet")
+        if os.path.exists(met_path) and "shortwave" not in df.columns:
+            me = pd.read_parquet(met_path)
+            me["date"] = pd.to_datetime(me["date"]).dt.normalize()
+            df = df.merge(me, on=["cell_lat", "cell_lon", "date"], how="left")
+            for c in ["shortwave", "et0", "cloud_cover"]:
+                if c in df.columns:
+                    print(f"  {c} merged: {df[c].notna().mean()*100:.1f}% coverage")
+
+        df = df.drop(columns=["cell_lat", "cell_lon"], errors="ignore")
+
     # ── Fill missing features ──
     available = [f for f in FEATURES if f in df.columns]
     missing = [f for f in FEATURES if f not in df.columns]
@@ -371,7 +443,19 @@ def load_data():
         for f in missing:
             df[f] = 0.0
 
-    df[FEATURES] = df[FEATURES].fillna(df[FEATURES].median())
+    # hms_smoke fills with 0 (no smoke); everything else with its median.
+    non_hms = [f for f in FEATURES if f != "hms_smoke"]
+    df[non_hms] = df[non_hms].fillna(df[non_hms].median())
+    if "hms_smoke" in df.columns:
+        df["hms_smoke"] = df["hms_smoke"].fillna(0)
+
+    # Record the exact inference-time fill values (training medians) so the
+    # backend can reproduce them and avoid train/serve skew.
+    for f in non_hms:
+        try:
+            FEATURE_FILL[f] = float(np.nanmedian(df[f].values))
+        except Exception:
+            FEATURE_FILL[f] = 0.0
 
     print(f"\n  Final rows: {len(df)}")
     print(f"  Features: {len(FEATURES)}")
@@ -724,14 +808,19 @@ if __name__ == "__main__":
         "models": full_models,
         "weights": weights,
         "feature_names": FEATURES,
-        "version": "v3_log_dist",
+        "version": "v4_smoke",
         "target_transform": "log1p" if LOG_TRANSFORM_TARGET else None,
         "pm25_train_cap": PM25_TRAIN_CAP,
+        "feature_fill": FEATURE_FILL,  # exact inference-time fallback values
     }
 
     out_path = os.path.join(MODELS_DIR, "ensemble.joblib")
-    joblib.dump(bundle, out_path)
-    print(f"\nSaved enhanced model → {out_path}")
+    # LZMA-3 compression: tree ensembles compress 3-5x. Keeps the bundle well
+    # under GitHub's 100 MB blob limit as we add features (uncompressed would
+    # exceed it). joblib.load with mmap_mode='r' falls back to normal load for
+    # compressed files, so the backend reads it fine.
+    joblib.dump(bundle, out_path, compress=("lzma", 3))
+    print(f"\nSaved enhanced model → {out_path} ({os.path.getsize(out_path)/1e6:.1f} MB, lzma-3)")
 
     # Save feature names early too
     feat_path = os.path.join(MODELS_DIR, "feature_names.json")

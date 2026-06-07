@@ -23,6 +23,19 @@ HMS_BASE_URL = (
 # Texas + adjacent buffer (matches training data extent).
 TX_BBOX = {"xmin": -107.0, "ymin": 25.5, "xmax": -93.0, "ymax": 37.0}
 
+# SINGLE SOURCE OF TRUTH for the smoke density -> ordinal feature value, shared
+# by training (pipeline/10_build_hms_history.py) and inference (backend). Any
+# divergence here would silently shift the hms_smoke feature and scramble preds.
+DENSITY_TO_INT = {"light": 1, "medium": 2, "heavy": 3}
+
+
+def density_to_int(density: str) -> int:
+    """Map an HMS Density string to its ordinal value (0 if none/unknown).
+    A real polygon with a blank/unrecognized density counts as light (1)."""
+    if not density:
+        return 0
+    return DENSITY_TO_INT.get(str(density).strip().lower(), 1)
+
 
 def _bbox_intersects_tx(bb) -> bool:
     """Reject polygons entirely outside Texas+buffer bbox."""
@@ -151,3 +164,53 @@ def _density_counts(features: list[dict]) -> dict:
         d = f["properties"].get("density", "Unknown")
         counts[d] = counts.get(d, 0) + 1
     return counts
+
+
+# ── Point-in-polygon smoke density (shared by training + inference) ────────────
+# These build shapely geometries from the same GeoJSON features parse_hms_zip
+# produces, so the hms_smoke feature is computed identically at train and serve
+# time. This is the one thing that prevents a train/inference scramble.
+
+def build_density_polygons(features: list[dict]):
+    """From parsed HMS GeoJSON features, build a list of
+    (prepared_shapely_polygon, density_int). Invalid rings are repaired with
+    buffer(0). Returns [] if shapely is unavailable or no valid polygons."""
+    try:
+        from shapely.geometry import shape as shp_shape
+        from shapely.prepared import prep
+    except Exception as e:
+        print(f"[hms] shapely unavailable: {e}")
+        return []
+
+    polys = []
+    for f in features:
+        try:
+            geom = shp_shape(f["geometry"])
+            if not geom.is_valid:
+                geom = geom.buffer(0)
+            if geom.is_empty:
+                continue
+            d_int = density_to_int(f.get("properties", {}).get("density", ""))
+            polys.append((prep(geom), d_int))
+        except Exception:
+            continue
+    return polys
+
+
+def smoke_density_at(prepared_polys, lon: float, lat: float) -> int:
+    """Max smoke-density ordinal of all polygons containing (lon, lat). 0 if none.
+    Coordinates are WGS84 lon/lat — Point takes (x=lon, y=lat)."""
+    if not prepared_polys:
+        return 0
+    try:
+        from shapely.geometry import Point
+    except Exception:
+        return 0
+    pt = Point(lon, lat)
+    best = 0
+    for prepared, d_int in prepared_polys:
+        if d_int > best and prepared.contains(pt):
+            best = d_int
+            if best == 3:
+                break
+    return best

@@ -3,36 +3,99 @@
     "test_size": 80142,
     "train_size": 320568,
     "rf": {
-      "rmse": 3.8867,
-      "r2": 0.7543,
-      "mae": 2.4715
+      "rmse": 3.6778,
+      "r2": 0.78,
+      "mae": 2.2201
     },
     "lgbm": {
-      "rmse": 2.935,
-      "r2": 0.8599,
-      "mae": 1.5857
+      "rmse": 3.0619,
+      "r2": 0.8475,
+      "mae": 1.6803
     },
     "xgb": {
-      "rmse": 2.9623,
-      "r2": 0.8573,
-      "mae": 1.6147
+      "rmse": 3.1234,
+      "r2": 0.8413,
+      "mae": 1.746
     },
     "cat": {
-      "rmse": 3.1932,
-      "r2": 0.8341,
-      "mae": 1.7997
+      "rmse": 3.2585,
+      "r2": 0.8273,
+      "mae": 1.8662
     },
     "ensemble": {
-      "rmse": 3.0548,
-      "r2": 0.8482,
-      "mae": 1.702
+      "rmse": 3.1841,
+      "r2": 0.8351,
+      "mae": 1.7914
     }
   },
   "loso_cv": {
-    "rmse": 4.3052,
-    "mae": 2.7055,
-    "r2": 0.694,
-    "n_sites": 427
+    "rmse": 4.2142,
+    "mae": 2.6023,
+    "r2": 0.7068,
+    "n_sites": 427,
+    "note": "pooled out-of-fold R\u00b2 with inverse-MSE blend (v4 baseline)"
+  },
+  "loso_cv_optimized": {
+    "r2": 0.7102,
+    "config": "simplex_4model",
+    "weights": {
+      "rf": 0.7755,
+      "lgbm": 0.1768,
+      "xgb": 0.0477,
+      "cat": 0.0
+    },
+    "method": "simplex-constrained convex combiner, GroupKFold-over-sensors cross-fit"
+  },
+  "ensemble_weight_optimization": {
+    "n_oof_rows": 400710,
+    "n_sensors": 427,
+    "models": [
+      "rf",
+      "lgbm",
+      "xgb",
+      "cat"
+    ],
+    "single_model_r2": {
+      "rf": 0.7098,
+      "lgbm": 0.7006,
+      "xgb": 0.6994,
+      "cat": 0.6967
+    },
+    "equal_weight_r2": 0.7059,
+    "inverse_mse_r2": 0.7068,
+    "simplex_4model_grouped_cv_r2": 0.7102,
+    "simplex_4model_insample_r2": 0.7106,
+    "nnls_4model_grouped_cv_r2": 0.7103,
+    "simplex_4model_weights": {
+      "rf": 0.7755,
+      "lgbm": 0.1768,
+      "xgb": 0.0477,
+      "cat": 0.0
+    },
+    "drop_rf": {
+      "models": [
+        "lgbm",
+        "xgb",
+        "cat"
+      ],
+      "weights": {
+        "lgbm": 0.5378,
+        "xgb": 0.2672,
+        "cat": 0.1951
+      },
+      "grouped_cv_r2": 0.7008,
+      "insample_r2": 0.7015
+    },
+    "chosen_config": "simplex_4model",
+    "chosen_weights": {
+      "rf": 0.7755,
+      "lgbm": 0.1768,
+      "xgb": 0.0477,
+      "cat": 0.0
+    },
+    "chosen_grouped_cv_r2": 0.7102,
+    "best_single_model": "rf",
+    "best_single_model_r2": 0.7098
   },
   "features": [
     "humidity",
@@ -52,17 +115,16 @@
     "longitude",
     "dist_to_nearest_sensor",
     "dist_to_coast",
-    "dist_to_urban",
+    "nbr_pm25_25km",
+    "nbr_count_25km",
     "nbr_pm25_50km",
     "nbr_count_50km",
     "nbr_std_50km",
+    "nbr_pm25_100km",
+    "nbr_count_100km",
     "hms_smoke",
     "aod",
     "cams_pm25",
-    "dust",
-    "shortwave",
-    "et0",
-    "cloud_cover",
     "month",
     "dow",
     "day_of_year",
@@ -75,7 +137,7 @@
     "temp_x_humidity",
     "wind_x_temp"
   ],
-  "n_features": 39,
+  "n_features": 38,
   "target_transform": null,
   "pm25_train_cap": 75.0
 }

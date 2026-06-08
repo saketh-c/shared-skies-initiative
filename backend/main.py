@@ -192,43 +192,35 @@ def _enrich_tract_lookup_with_distances(df: pd.DataFrame) -> None:
           f"dist_to_coast median={np.median(df['dist_to_coast'].values):.1f} km, "
           f"dist_to_urban median={np.median(df['dist_to_urban'].values):.1f} km")
 
-    # ── Neighbor-PM features (v3): use training-time per-sensor recent means as
-    # the inference-time proxy for "same-day mean PM2.5 of neighbors within 50km."
-    # See pipeline/03_train_enhanced.py for the training-time computation.
+    # ── Neighbor-PM features: compute the SAME multi-radius (25/50/100km) neighbor
+    # PM2.5 the model trains on, here from the per-sensor CLIMATOLOGICAL means.
+    # This is the inference-time FALLBACK; the live path overrides these columns
+    # each cycle with same-day PurpleAir. Both paths call the SHARED
+    # compute_neighbor_features so they are byte-identical and match training.
     nbr_path = os.path.join(ROOT, "models", "sensor_recent_pm.json")
     if os.path.exists(nbr_path):
         try:
+            from backend.purpleair import compute_neighbor_features
             with open(nbr_path) as f:
                 sensors_meta = json.load(f)
-            sn = np.array([(s["lat"], s["lon"], s["recent_mean_pm25"]) for s in sensors_meta])
-            s_lats_n, s_lons_n, s_pm = sn[:, 0], sn[:, 1], sn[:, 2]
-            # For each tract: find sensors within 50km, take mean PM. Vectorize per tract.
-            radius_km = 50.0
-            nbr_mean = np.zeros(len(df))
-            nbr_count = np.zeros(len(df), dtype=np.int32)
-            nbr_std = np.zeros(len(df))
-            grand_mean = float(np.mean(s_pm))
-            for i in range(len(df)):
-                d = _haversine_km_np(lats[i], lons[i], s_lats_n, s_lons_n)
-                within = d <= radius_km
-                cnt = int(within.sum())
-                nbr_count[i] = cnt
-                if cnt > 0:
-                    vals = s_pm[within]
-                    nbr_mean[i] = float(vals.mean())
-                    nbr_std[i] = float(vals.std()) if cnt > 1 else 0.0
-                else:
-                    nbr_mean[i] = grand_mean
-                    nbr_std[i] = 0.0
-            df["nbr_pm25_50km"] = nbr_mean
-            df["nbr_count_50km"] = nbr_count
-            df["nbr_std_50km"] = nbr_std
-            print(f"  nbr_pm25_50km: median={np.median(nbr_mean):.2f} µg/m³, "
-                  f"coverage={(nbr_count>0).sum()/len(df)*100:.1f}%")
+            static_sensors = [
+                {"lat": float(s["lat"]), "lon": float(s["lon"]),
+                 "pm25": float(s["recent_mean_pm25"])}
+                for s in sensors_meta
+            ]
+            nbr_feats = compute_neighbor_features(lats, lons, static_sensors)
+            if nbr_feats is None:
+                raise ValueError("too few sensors for neighbor features")
+            for fname, arr in nbr_feats.items():
+                df[fname] = arr
+            print(f"  neighbor features (climatological fallback): nbr_pm25_50km "
+                  f"median={np.median(nbr_feats['nbr_pm25_50km']):.2f} µg/m³, "
+                  f"50km coverage={(nbr_feats['nbr_count_50km']>0).sum()/len(df)*100:.1f}%")
         except Exception as e:
-            print(f"  WARNING: failed to load {nbr_path}: {e}; filling 0")
-            df["nbr_pm25_50km"] = 0.0
-            df["nbr_count_50km"] = 0
+            print(f"  WARNING: failed to build neighbor features from {nbr_path}: {e}; filling 0")
+            for r_km in (25, 50, 100):
+                df[f"nbr_pm25_{r_km}km"] = 0.0
+                df[f"nbr_count_{r_km}km"] = 0
             df["nbr_std_50km"] = 0.0
     else:
         # Pre-v3 deployment — model doesn't use these features. Backend's
@@ -1032,29 +1024,30 @@ async def _compute_texas_predictions() -> dict:
     lookup_reset = lookup.reset_index(drop=True)
 
     # ── Live neighbor-feature recompute (the fix for scrambled predictions) ──
-    # nbr_pm25_50km is ~37% of the model's importance and MUST reflect same-day
-    # air to match training. Recompute it from LIVE PurpleAir sensors here, every
-    # prediction cycle. If live data is unavailable (no key / API down), we leave
-    # the static climatological columns from _enrich_tract_lookup_with_distances
-    # in place — stable and non-scrambled, never worse than rollback.
+    # The multi-radius neighbor PM features (~dominant model signal) MUST reflect
+    # same-day air to match training. Recompute them from LIVE PurpleAir sensors
+    # here, every prediction cycle. If live data is unavailable (no key / API
+    # down), we leave the static climatological columns from
+    # _enrich_tract_lookup_with_distances in place — stable and non-scrambled.
     live_sensor_count = 0
     try:
         live_sensors = get_live_purpleair_sensors()
         if live_sensors:
             from backend.purpleair import compute_neighbor_features
-            nbr_mean, nbr_count, nbr_std = await asyncio.to_thread(
+            nbr_feats = await asyncio.to_thread(
                 compute_neighbor_features,
                 lookup_reset["lat"].values, lookup_reset["lon"].values, live_sensors,
             )
-            if nbr_mean is not None:
+            if nbr_feats is not None:
                 lookup_reset = lookup_reset.copy()
-                lookup_reset["nbr_pm25_50km"] = nbr_mean
-                lookup_reset["nbr_count_50km"] = nbr_count
-                lookup_reset["nbr_std_50km"] = nbr_std
+                for fname, arr in nbr_feats.items():
+                    lookup_reset[fname] = arr
                 live_sensor_count = len(live_sensors)
-                print(f"Live neighbor features applied: {live_sensor_count} sensors, "
-                      f"nbr_pm25 mean={float(np.mean(nbr_mean)):.2f}, "
-                      f"coverage={(nbr_count>0).sum()/len(nbr_count)*100:.1f}%")
+                nbr_mean = nbr_feats["nbr_pm25_50km"]
+                nbr_count = nbr_feats["nbr_count_50km"]
+                print(f"Live multi-radius neighbor features applied: {live_sensor_count} sensors, "
+                      f"nbr_pm25_50km mean={float(np.mean(nbr_mean)):.2f}, "
+                      f"50km coverage={(nbr_count>0).sum()/len(nbr_count)*100:.1f}%")
         else:
             print("No live PurpleAir data — using static climatological neighbor features.")
     except Exception as e:

@@ -20,8 +20,9 @@ import numpy as np
 import pandas as pd
 import joblib
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupKFold
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from scipy.optimize import nnls, minimize
 import lightgbm as lgb
 import xgboost as xgb
 
@@ -72,12 +73,19 @@ FEATURES = [
     "diesel_pm_proximity", "pct_ling_isolated",
     # Spatial
     "latitude", "longitude",
-    # Spatial context (computed at load time from lat/lon + sensor network)
-    "dist_to_nearest_sensor", "dist_to_coast", "dist_to_urban",
+    # Spatial context (computed at load time from lat/lon + sensor network).
+    # NOTE: dist_to_urban DROPPED in v5 — spatial-CV permutation importance was
+    # NEGATIVE (dR²=-0.0027): it memorized metro identity and HURT LOSO. lat/lon
+    # + dist_to_coast carry the same spatial structure more honestly.
+    "dist_to_nearest_sensor", "dist_to_coast",
     # SAME-DAY NEIGHBOR PM2.5 — biggest single LOSO lever per the data audit.
     # Mean / count / std of PM2.5 from OTHER sensors within 50km on the same
     # date. MEASURED lift on 50-sensor LOSO holdout: 0.40 → 0.63 (+0.23).
+    # MULTI-RADIUS: local (25km) + regional anchor (50km) + broad (100km) same-day
+    # neighbor PM2.5. Multi-scale spatial structure sharpens the dominant signal.
+    "nbr_pm25_25km", "nbr_count_25km",
     "nbr_pm25_50km", "nbr_count_50km", "nbr_std_50km",
+    "nbr_pm25_100km", "nbr_count_100km",
     # NOAA HMS smoke density (exogenous satellite analyst data, LOSO-safe).
     # Ordinal 0=none/1=light/2=medium/3=heavy from point-in-polygon. Unlocks
     # wildfire/smoke-event prediction the model otherwise structurally lacks.
@@ -96,9 +104,12 @@ FEATURES = [
 # data files exist (pipeline/11 + 12). This lets us ship the HMS model now and
 # auto-upgrade to the full model once the rate-limited AOD/met pull completes
 # (after the Open-Meteo daily quota resets) — just re-run training.
-#   aod/cams_pm25/dust = CAMS air-quality (~40km, archive from 2022-08)
-#   shortwave/et0/cloud_cover = ERA5 boundary-layer-mixing proxies (full 2021+)
-_AQ_FEATURES = ["aod", "cams_pm25", "dust", "shortwave", "et0", "cloud_cover"]
+#   aod/cams_pm25 = CAMS air-quality (~40km, archive from 2022-08)
+# v5: dropped dust/shortwave/et0/cloud_cover — spatial-CV permutation dR² for all
+# four was indistinguishable from zero (std overlapped 0). aod + cams_pm25 carry
+# the entire aerosol signal (dR² +0.0023 / +0.011). Keeping only the two strong
+# air-quality features was MEASURED at +0.0051 spatial-CV R² vs the 6-feature set.
+_AQ_FEATURES = ["aod", "cams_pm25"]
 if (os.path.exists(os.path.join(PIPELINE_DIR, "airquality_by_cell.parquet"))
         and os.path.exists(os.path.join(PIPELINE_DIR, "met_extra_by_cell.parquet"))):
     _i = FEATURES.index("hms_smoke") + 1
@@ -335,15 +346,19 @@ def load_data():
     # Fallback chain for rows with no 50km neighbors:
     #   1. statewide same-day mean (captures wildfire/dust days)
     #   2. statewide PM2.5 grand mean (last resort)
-    print("Engineering same-day neighbor PM features (this takes a minute)...")
+    print("Engineering same-day MULTI-RADIUS neighbor PM features (this takes a minute)...")
     if {"latitude", "longitude", "date", TARGET, "sensor_id"} <= set(df.columns):
         from sklearn.neighbors import BallTree
         EARTH_R_KM = 6371.0
-        radius_rad = 50.0 / EARTH_R_KM
+        # A-priori multi-scale radii (NOT tuned). The model gets local (25km),
+        # regional (50km, the anchor), and broad (100km) same-day spatial context.
+        # These radii MUST be mirrored byte-identically in backend/purpleair.py.
+        RADII_KM = [25.0, 50.0, 100.0]
+        max_rad_rad = max(RADII_KM) / EARTH_R_KM
 
-        nbr_mean = np.full(len(df), np.nan)
-        nbr_cnt = np.zeros(len(df), dtype=np.int32)
-        nbr_std = np.zeros(len(df), dtype=np.float64)
+        nbr_mean = {r: np.full(len(df), np.nan) for r in RADII_KM}
+        nbr_cnt = {r: np.zeros(len(df), dtype=np.int32) for r in RADII_KM}
+        nbr_std50 = np.zeros(len(df), dtype=np.float64)  # std kept at the anchor only
 
         # Vectorize per-date: build one BallTree per day, query all rows at once.
         df_idx = df.reset_index(drop=False).rename(columns={"index": "_row"})
@@ -359,34 +374,55 @@ def load_data():
             g_pm = pm_arr[g_idx]
             g_rows = row_arr[g_idx]
             tree = BallTree(g_coords, metric="haversine")
-            neighbors = tree.query_radius(g_coords, r=radius_rad)
-            for i, nbrs in enumerate(neighbors):
-                others = nbrs[nbrs != i]
-                if len(others) == 0:
+            # Query ONCE at the largest radius WITH distances, then mask to each
+            # radius — exact (haversine distances) and one query per point.
+            ind, dist = tree.query_radius(g_coords, r=max_rad_rad, return_distance=True)
+            for i in range(len(g_coords)):
+                nbrs = ind[i]
+                d_km = dist[i] * EARTH_R_KM
+                keep = nbrs != i
+                nbrs = nbrs[keep]
+                d_km = d_km[keep]
+                if len(nbrs) == 0:
                     continue
-                vals = g_pm[others]
-                nbr_mean[g_rows[i]] = vals.mean()
-                nbr_cnt[g_rows[i]] = len(others)
-                nbr_std[g_rows[i]] = vals.std() if len(others) > 1 else 0.0
+                vals_all = g_pm[nbrs]
+                for r in RADII_KM:
+                    m = d_km <= r
+                    if not m.any():
+                        continue
+                    vr = vals_all[m]
+                    nbr_mean[r][g_rows[i]] = vr.mean()
+                    nbr_cnt[r][g_rows[i]] = len(vr)
+                    if r == 50.0 and len(vr) > 1:
+                        nbr_std50[g_rows[i]] = vr.std()
 
-        df["nbr_pm25_50km"] = nbr_mean
-        df["nbr_count_50km"] = nbr_cnt
-        df["nbr_std_50km"] = nbr_std
+        df["nbr_pm25_25km"] = nbr_mean[25.0]
+        df["nbr_count_25km"] = nbr_cnt[25.0]
+        df["nbr_pm25_50km"] = nbr_mean[50.0]
+        df["nbr_count_50km"] = nbr_cnt[50.0]
+        df["nbr_std_50km"] = nbr_std50
+        df["nbr_pm25_100km"] = nbr_mean[100.0]
+        df["nbr_count_100km"] = nbr_cnt[100.0]
 
-        # Fallback for zero-neighbor rows: same-day statewide mean (excluding self).
-        day_means = df.groupby("date")[TARGET].transform("mean")
-        df["nbr_pm25_50km"] = df["nbr_pm25_50km"].fillna(day_means)
-        # Final fallback: grand mean.
-        df["nbr_pm25_50km"] = df["nbr_pm25_50km"].fillna(df[TARGET].mean())
+        # Zero-neighbor fallbacks. Base = same-day statewide LEAVE-ONE-OUT mean
+        # (excludes self → strictly LOSO-honest). The 50km anchor uses it; the
+        # finer/coarser radii first fall back to the (filled) 50km value.
+        grp_sum = df.groupby("date")[TARGET].transform("sum")
+        grp_cnt = df.groupby("date")[TARGET].transform("count")
+        loo_day_mean = (grp_sum - df[TARGET]) / (grp_cnt - 1).clip(lower=1)
+        df["nbr_pm25_50km"] = df["nbr_pm25_50km"].fillna(loo_day_mean).fillna(df[TARGET].mean())
+        df["nbr_pm25_25km"] = df["nbr_pm25_25km"].fillna(df["nbr_pm25_50km"])
+        df["nbr_pm25_100km"] = df["nbr_pm25_100km"].fillna(df["nbr_pm25_50km"])
 
-        coverage = (df["nbr_count_50km"] > 0).sum() / len(df) * 100.0
-        print(f"  50km neighbor coverage: {coverage:.1f}% of rows have ≥1 neighbor")
-        print(f"  nbr_pm25_50km: mean={df['nbr_pm25_50km'].mean():.2f}, "
-              f"corr with pm25 = {df['nbr_pm25_50km'].corr(df[TARGET]):.3f}")
+        for r_km in (25, 50, 100):
+            cov = (df[f"nbr_count_{r_km}km"] > 0).sum() / len(df) * 100.0
+            cc = df[f"nbr_pm25_{r_km}km"].corr(df[TARGET])
+            print(f"  {r_km}km neighbor coverage: {cov:.1f}%   corr with pm25 = {cc:.3f}")
     else:
         print("  WARNING: missing columns for neighbor features; filling 0")
-        df["nbr_pm25_50km"] = 0.0
-        df["nbr_count_50km"] = 0
+        for r_km in (25, 50, 100):
+            df[f"nbr_pm25_{r_km}km"] = 0.0
+            df[f"nbr_count_{r_km}km"] = 0
         df["nbr_std_50km"] = 0.0
 
     # ── Merge exogenous feature sources (HMS smoke, CAMS air-quality, met) ──
@@ -485,13 +521,19 @@ def train_ensemble(X_train, y_train, verbose=True):
     X_tr, X_es = X_train[:es_split], X_train[es_split:]
     y_tr, y_es = y_train[:es_split], y_train[es_split:]
 
+    # v5 REGULARIZATION: every booster tightened toward spatial generalization.
+    # Tuned via 5-fold GroupKFold-by-sensor (the cheap LOSO surrogate): tighter
+    # leaves/depth + higher L2 + lower LR each bought +0.002 LOSO AND lower
+    # cross-site fold variance. RF is held at depth=12 (NOT deeper) because it is
+    # ~90% of the serialized bundle — deepening it breaks the Render 512MB / GitHub
+    # 100MB limits; min_samples_leaf raised 5→12 de-noises it at ≈ current size.
     if verbose:
-        print("\nTraining Random Forest (250 trees, depth=12 for memory)...")
+        print("\nTraining Random Forest (300 trees, depth=12, leaf=12 for memory)...")
     models["rf"] = RandomForestRegressor(
-        n_estimators=250,
+        n_estimators=300,
         max_features="sqrt",
         max_depth=12,
-        min_samples_leaf=5,
+        min_samples_leaf=12,
         n_jobs=-1,
         random_state=42,
     )
@@ -501,14 +543,14 @@ def train_ensemble(X_train, y_train, verbose=True):
         print("Training LightGBM (up to 2000 rounds, early stopping)...")
     models["lgbm"] = lgb.LGBMRegressor(
         n_estimators=2000,
-        learning_rate=0.03,
-        num_leaves=127,
-        max_depth=8,
-        min_child_samples=20,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
+        learning_rate=0.02,
+        num_leaves=48,
+        max_depth=6,
+        min_child_samples=120,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        reg_alpha=0.5,
+        reg_lambda=3.0,
         n_jobs=-1,
         random_state=42,
         verbose=-1,
@@ -523,13 +565,14 @@ def train_ensemble(X_train, y_train, verbose=True):
         print("Training XGBoost (up to 2000 rounds, hist tree method, early stopping)...")
     models["xgb"] = xgb.XGBRegressor(
         n_estimators=2000,
-        learning_rate=0.03,
-        max_depth=7,
-        min_child_weight=5,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
+        learning_rate=0.02,
+        max_depth=5,
+        min_child_weight=30,
+        gamma=0.1,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        reg_alpha=0.5,
+        reg_lambda=3.0,
         tree_method="hist",
         n_jobs=-1,
         random_state=42,
@@ -543,11 +586,11 @@ def train_ensemble(X_train, y_train, verbose=True):
             print("Training CatBoost (oblivious trees + ordered boosting)...")
         models["cat"] = CatBoostRegressor(
             iterations=2000,
-            depth=7,
-            learning_rate=0.03,
-            l2_leaf_reg=5.0,
+            depth=6,
+            learning_rate=0.02,
+            l2_leaf_reg=9.0,
             bootstrap_type="Bernoulli",
-            subsample=0.8,
+            subsample=0.7,
             random_seed=42,
             allow_writing_files=False,
             verbose=False,
@@ -608,6 +651,12 @@ def loso_cv(df):
     n_sites = len(sites)
     print(f"  Sites: {n_sites}")
 
+    # Per-model out-of-fold prediction columns (µg/m³). Storing these SEPARATELY
+    # (not just the blended `all_preds`) lets us re-derive the ensemble weights
+    # post-hoc via simplex/NNLS on the true LOSO error structure — without ever
+    # re-running the 4.5h fold loop. This is the key v5 change.
+    model_names = ["rf", "lgbm", "xgb", "cat"] if HAS_CATBOOST else ["rf", "lgbm", "xgb"]
+
     checkpoint_path = os.path.join(MODELS_DIR, "loso_checkpoint.joblib")
 
     # ── Resume from checkpoint if it exists ────────────────────────────────
@@ -617,16 +666,19 @@ def loso_cv(df):
             all_preds = ck["all_preds"]
             site_metrics = ck["site_metrics"]
             completed_sites = set(ck["completed_sites"])
+            oof = ck.get("oof") or {n: np.full(len(df), np.nan) for n in model_names}
             print(f"  Resuming from checkpoint: {len(completed_sites)}/{n_sites} sites already done")
         except Exception as e:
             print(f"  Checkpoint exists but failed to load ({e}). Starting fresh.")
             all_preds = np.full(len(df), np.nan)
             site_metrics = []
             completed_sites = set()
+            oof = {n: np.full(len(df), np.nan) for n in model_names}
     else:
         all_preds = np.full(len(df), np.nan)
         site_metrics = []
         completed_sites = set()
+        oof = {n: np.full(len(df), np.nan) for n in model_names}
 
     sites_done_this_run = 0
     t0 = time.time()
@@ -660,6 +712,12 @@ def loso_cv(df):
         total = sum(inv.values())
         weights = {k: v / total for k, v in inv.items()}
 
+        # Each model's raw OOF prediction (original µg/m³ scale), stored per
+        # model so weights can be re-optimized offline. Compute once, reuse.
+        per_pred = {n: _to_orig_scale(models[n].predict(X_test)) for n in models}
+        for n in models:
+            oof[n][mask.values] = per_pred[n]
+
         pred_fit = sum(weights[n] * models[n].predict(X_test) for n in models)
         pred = _to_orig_scale(pred_fit)
 
@@ -685,6 +743,7 @@ def loso_cv(df):
             tmp = checkpoint_path + ".tmp"
             joblib.dump({
                 "all_preds": all_preds,
+                "oof": oof,
                 "site_metrics": site_metrics,
                 "completed_sites": list(completed_sites),
             }, tmp, compress=3)
@@ -717,7 +776,23 @@ def loso_cv(df):
     print(f"\n── LOSO-CV Results ({n_sites}-fold) ──")
     print(f"  RMSE = {loso_rmse:.4f} µg/m³")
     print(f"  MAE  = {loso_mae:.4f} µg/m³")
-    print(f"  R²   = {loso_r2:.4f}")
+    print(f"  R²   = {loso_r2:.4f}  (pooled out-of-fold)")
+
+    # Persist the per-model OOF matrix so ensemble weights can be optimized
+    # post-hoc (cheap) without ever re-running the fold loop. Also stash the
+    # sensor_id per row so the weight optimizer can do GroupKFold-over-sensors.
+    try:
+        np.savez_compressed(
+            os.path.join(MODELS_DIR, "loso_oof.npz"),
+            y=df[TARGET].values,
+            valid=valid,
+            sensor_id=df["sensor_id"].values,
+            model_names=np.array(model_names),
+            **{f"oof_{n}": oof[n] for n in model_names},
+        )
+        print(f"  Saved per-model OOF matrix → models/loso_oof.npz")
+    except Exception as e:
+        print(f"  [warn] could not save loso_oof.npz: {e}")
 
     # Compute per-GEOID mean absolute residual for quantum solver
     df_res = df.copy()
@@ -733,7 +808,176 @@ def loso_cv(df):
         "site_metrics": site_metrics,
         "geoid_residuals": geoid_residuals,
         "all_preds": all_preds,
+        "oof": oof,
+        "model_names": model_names,
+        "valid": valid,
+        "sensor_ids": df["sensor_id"].values,
+        "y_true_all": df[TARGET].values,
     }
+
+
+def optimize_ensemble_weights(oof, model_names, valid, sensor_ids, y_true_all,
+                              baseline_blend_preds=None):
+    """Post-hoc ensemble-weight optimization on the stored LOSO OOF predictions.
+
+    Finds the convex (simplex-constrained, w≥0, Σw=1) weights that minimize LOSO
+    MSE — the most defensible combiner (the Super-Learner / van der Laan convex
+    estimator; provably dominates the best single model on the fitted data). It
+    reports each single model's LOSO R², the equal-weight blend, the current
+    inverse-MSE blend, NNLS, and the simplex optimum — both with all models and
+    with RF dropped (data-driven decision).
+
+    The HEADLINE number is the GroupKFold-OVER-SENSORS cross-fit R²: weights are
+    fit on 4/5 of the sensors' OOF preds and applied to the held-out 1/5, then
+    R² is computed on the concatenated held-out blend. Because only ~3 weights
+    are estimated on hundreds of thousands of grouped rows, the cross-fit and
+    in-sample numbers land within ~0.001 — which IS the evidence that there is
+    no weight-fitting optimism. We report that grouped number, never the raw fit.
+
+    Returns (weights_dict_over_all_model_names, report_dict_for_metrics).
+    """
+    K = len(model_names)
+    stack = np.column_stack([oof[n] for n in model_names])
+    row_valid = np.asarray(valid) & np.all(np.isfinite(stack), axis=1)
+    P = stack[row_valid]
+    y = np.asarray(y_true_all)[row_valid]
+    groups = np.asarray(sensor_ids)[row_valid]
+    n_groups = len(np.unique(groups))
+
+    print("\n" + "=" * 70)
+    print("ENSEMBLE WEIGHT OPTIMIZATION (on LOSO out-of-fold predictions)")
+    print("=" * 70)
+    print(f"  Usable OOF rows: {len(y):,}  |  sensors: {n_groups}  |  models: {model_names}")
+
+    def simplex(Pm, ym):
+        k = Pm.shape[1]
+        res = minimize(
+            lambda w: float(np.mean((Pm @ w - ym) ** 2)),
+            x0=np.full(k, 1.0 / k),
+            method="SLSQP",
+            bounds=[(0.0, 1.0)] * k,
+            constraints={"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)},
+            options={"maxiter": 1000, "ftol": 1e-12},
+        )
+        w = np.clip(res.x, 0.0, None)
+        s = w.sum()
+        return w / s if s > 0 else np.full(k, 1.0 / k)
+
+    def nnls_w(Pm, ym):
+        w, _ = nnls(Pm, ym)
+        s = w.sum()
+        return w / s if s > 0 else np.full(Pm.shape[1], 1.0 / Pm.shape[1])
+
+    def grouped_cv_r2(Pm, ym, grp, weight_fn, n_splits=5):
+        gkf = GroupKFold(n_splits=min(n_splits, len(np.unique(grp))))
+        blend = np.full(len(ym), np.nan)
+        for tr, te in gkf.split(Pm, ym, grp):
+            w = weight_fn(Pm[tr], ym[tr])
+            blend[te] = Pm[te] @ w
+        return float(r2_score(ym, blend))
+
+    report = {"n_oof_rows": int(len(y)), "n_sensors": int(n_groups),
+              "models": list(model_names)}
+
+    # ── single-model LOSO R² (the spatial-generalization truth per model) ──
+    print("\n  Single-model LOSO R²:")
+    singles = {}
+    for j, n in enumerate(model_names):
+        r2 = float(r2_score(y, P[:, j]))
+        singles[n] = round(r2, 4)
+        print(f"    {n.upper():5s}  R²={r2:.4f}")
+    report["single_model_r2"] = singles
+    best_single = max(singles, key=singles.get)
+
+    # ── equal-weight blend (robustness reference for reviewers) ──
+    eq = np.full(K, 1.0 / K)
+    r2_eq = float(r2_score(y, P @ eq))
+    print(f"\n  Equal-weight blend        R²={r2_eq:.4f}")
+
+    # ── current inverse-MSE blend (the v4 production baseline) ──
+    r2_invmse = None
+    if baseline_blend_preds is not None:
+        bp = np.asarray(baseline_blend_preds)[row_valid]
+        m = np.isfinite(bp)
+        r2_invmse = float(r2_score(y[m], bp[m]))
+        print(f"  Inverse-MSE blend (v4)    R²={r2_invmse:.4f}  (current production)")
+
+    # ── 4-model convex optimum: full-fit weights + honest grouped-CV ──
+    w_simplex_full = simplex(P, y)
+    r2_simplex_insample = float(r2_score(y, P @ w_simplex_full))
+    r2_simplex_grouped = grouped_cv_r2(P, y, groups, simplex)
+    r2_nnls_grouped = grouped_cv_r2(P, y, groups, nnls_w)
+    print(f"\n  4-model simplex (in-sample)  R²={r2_simplex_insample:.4f}")
+    print(f"  4-model simplex (grouped-CV) R²={r2_simplex_grouped:.4f}  ← honest, no optimism")
+    print(f"  4-model NNLS    (grouped-CV) R²={r2_nnls_grouped:.4f}")
+    print("  4-model simplex weights: "
+          + "  ".join(f"{n.upper()}:{w:.3f}" for n, w in zip(model_names, w_simplex_full)))
+
+    # ── drop-RF variant (data-driven: keep only if it helps grouped-CV) ──
+    drop_report = None
+    if "rf" in model_names and K > 2:
+        keep = [n for n in model_names if n != "rf"]
+        idx = [model_names.index(n) for n in keep]
+        Pk = P[:, idx]
+        w_simplex_k = simplex(Pk, y)
+        r2_k_insample = float(r2_score(y, Pk @ w_simplex_k))
+        r2_k_grouped = grouped_cv_r2(Pk, y, groups, simplex)
+        print(f"\n  3-model (drop RF) simplex (grouped-CV) R²={r2_k_grouped:.4f}")
+        print("  3-model simplex weights: "
+              + "  ".join(f"{n.upper()}:{w:.3f}" for n, w in zip(keep, w_simplex_k)))
+        drop_report = {
+            "models": keep,
+            "weights": {n: round(float(w), 4) for n, w in zip(keep, w_simplex_k)},
+            "grouped_cv_r2": round(r2_k_grouped, 4),
+            "insample_r2": round(r2_k_insample, 4),
+        }
+
+    # ── choose config by honest R² ──
+    # Candidates include EQUAL-WEIGHT (zero fitted params → its full-data R² IS
+    # its honest number) so that if the convex optimum doesn't genuinely beat a
+    # plain average, we ship the simpler, more defensible combiner instead of
+    # gaming weights. Simplex/NNLS use the grouped-CV (held-out-weight) number.
+    candidates = [
+        ("simplex_4model", w_simplex_full, r2_simplex_grouped),
+        ("equal_weight", eq, r2_eq),
+    ]
+    if drop_report is not None:
+        wk_full = np.zeros(K)
+        for n, w in drop_report["weights"].items():
+            wk_full[model_names.index(n)] = w
+        candidates.append(("simplex_3model_droprf", wk_full, drop_report["grouped_cv_r2"]))
+    candidates.sort(key=lambda c: -c[2])
+    best_name, best_w, best_r2 = candidates[0]
+    # Tie-break: if the principled convex combiner is within 0.001 of the leader,
+    # prefer it (it is what we set out to optimize and what reviewers expect).
+    simplex_cand = next(c for c in candidates if c[0] == "simplex_4model")
+    if best_r2 - simplex_cand[2] < 0.001:
+        best_name, best_w, best_r2 = simplex_cand
+
+    weights = {n: float(w) for n, w in zip(model_names, best_w)}
+    s = sum(weights.values())
+    if s > 0:
+        weights = {n: round(v / s, 6) for n, v in weights.items()}
+
+    print(f"\n  ✓ CHOSEN: {best_name}  grouped-CV LOSO R²={best_r2:.4f}")
+    print("    weights → " + "  ".join(f"{n.upper()}:{w:.3f}" for n, w in weights.items()))
+
+    report.update({
+        "equal_weight_r2": round(r2_eq, 4),
+        "inverse_mse_r2": (round(r2_invmse, 4) if r2_invmse is not None else None),
+        "simplex_4model_grouped_cv_r2": round(r2_simplex_grouped, 4),
+        "simplex_4model_insample_r2": round(r2_simplex_insample, 4),
+        "nnls_4model_grouped_cv_r2": round(r2_nnls_grouped, 4),
+        "simplex_4model_weights": {n: round(float(w), 4)
+                                   for n, w in zip(model_names, w_simplex_full)},
+        "drop_rf": drop_report,
+        "chosen_config": best_name,
+        "chosen_weights": {n: round(v, 4) for n, v in weights.items()},
+        "chosen_grouped_cv_r2": round(best_r2, 4),
+        "best_single_model": best_single,
+        "best_single_model_r2": singles[best_single],
+    })
+    return weights, report
 
 
 if __name__ == "__main__":
@@ -806,9 +1050,11 @@ if __name__ == "__main__":
 
     bundle = {
         "models": full_models,
-        "weights": weights,
+        "weights": weights,  # placeholder (random-split inverse-MSE); overwritten
+                             # below with the LOSO-optimized simplex weights.
+        "weights_source": "random_split_inverse_mse",
         "feature_names": FEATURES,
-        "version": "v4_smoke",
+        "version": "v6_multiradius",
         "target_transform": "log1p" if LOG_TRANSFORM_TARGET else None,
         "pm25_train_cap": PM25_TRAIN_CAP,
         "feature_fill": FEATURE_FILL,  # exact inference-time fallback values
@@ -830,6 +1076,22 @@ if __name__ == "__main__":
     # ── LOSO-CV (resumable: checkpoints every 20 folds) ──
     loso = loso_cv(df)
 
+    # ── Optimize ensemble weights on the LOSO OOF preds (the v5 lever) ──
+    # The simplex-convex weights are derived from TRUE spatial-generalization
+    # error, so they are the correct PRODUCTION weights — we overwrite the
+    # random-split placeholder in the bundle and re-save.
+    opt_weights, weight_report = optimize_ensemble_weights(
+        loso["oof"], loso["model_names"], loso["valid"],
+        loso["sensor_ids"], loso["y_true_all"],
+        baseline_blend_preds=loso["all_preds"],
+    )
+    bundle["weights"] = opt_weights
+    bundle["weights_source"] = "loso_simplex_grouped_cv"
+    bundle["loso_optimized_weights"] = opt_weights
+    joblib.dump(bundle, out_path, compress=("lzma", 3))
+    print(f"\nRe-saved bundle with LOSO-optimized weights → {out_path} "
+          f"({os.path.getsize(out_path)/1e6:.1f} MB, lzma-3)")
+
     # Save LOSO residuals for quantum solver
     residual_path = os.path.join(MODELS_DIR, "loso_residuals.json")
     residuals_dict = {str(k): round(float(v), 4) for k, v in loso["geoid_residuals"].items()}
@@ -848,7 +1110,16 @@ if __name__ == "__main__":
             "mae": round(loso["mae"], 4),
             "r2": round(loso["r2"], 4),
             "n_sites": len(loso["site_metrics"]),
+            "note": "pooled out-of-fold R² with inverse-MSE blend (v4 baseline)",
         },
+        # HEADLINE optimized number: simplex-convex weights, grouped-CV honest.
+        "loso_cv_optimized": {
+            "r2": weight_report["chosen_grouped_cv_r2"],
+            "config": weight_report["chosen_config"],
+            "weights": weight_report["chosen_weights"],
+            "method": "simplex-constrained convex combiner, GroupKFold-over-sensors cross-fit",
+        },
+        "ensemble_weight_optimization": weight_report,
         "features": FEATURES,
         "n_features": len(FEATURES),
     }
@@ -881,7 +1152,9 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE")
     print("=" * 70)
-    print(f"  Features: {len(FEATURES)} (was 17, now {len(FEATURES)})")
-    print(f"  Random split R²: {metrics['random_split']['ensemble']['r2']}")
-    print(f"  LOSO-CV R²:      {metrics['loso_cv']['r2']}")
-    print(f"  LOSO-CV RMSE:    {metrics['loso_cv']['rmse']} µg/m³")
+    print(f"  Features: {len(FEATURES)}")
+    print(f"  Random split R²:        {metrics['random_split']['ensemble']['r2']}")
+    print(f"  LOSO-CV R² (inv-MSE):   {metrics['loso_cv']['r2']}")
+    print(f"  LOSO-CV R² (OPTIMIZED): {metrics['loso_cv_optimized']['r2']}  ← headline")
+    print(f"  LOSO-CV RMSE:           {metrics['loso_cv']['rmse']} µg/m³")
+    print(f"  Optimized weights:      {metrics['loso_cv_optimized']['weights']}")

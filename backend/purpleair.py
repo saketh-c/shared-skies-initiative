@@ -130,20 +130,30 @@ async def fetch_live_sensors() -> list[dict]:
     return sensors
 
 
+# MULTI-RADIUS neighbor radii — MUST match pipeline/03_train_enhanced.py exactly
+# (RADII_KM there). Changing one side without the other scrambles predictions.
+NBR_RADII_KM = [25.0, 50.0, 100.0]
+
+
 def compute_neighbor_features(tract_lats, tract_lons, sensors):
-    """Replicate the training same-day neighbor computation for tract centroids.
+    """Replicate the training MULTI-RADIUS same-day neighbor computation for
+    tract centroids — the single source of truth shared by the live and the
+    climatological-fallback inference paths.
 
-    For each tract: mean / count / population-std of PM2.5 from live sensors
-    within 50km. Tracts with zero neighbors get the live statewide same-day
-    mean (matching the training fallback) with count=0, std=0.
+    For each tract: mean + count of PM2.5 from sensors within 25 / 50 / 100 km,
+    plus population-std at the 50km anchor. Mirrors the training BallTree
+    (haversine, query once at the 100km max radius WITH distances, then mask to
+    each radius) byte-identically. Fallbacks match training: the 50km anchor
+    falls back to the statewide same-day mean; 25km and 100km fall back to the
+    (filled) 50km value.
 
-    Returns (nbr_mean, nbr_count, nbr_std) numpy arrays aligned to the inputs,
-    or (None, None, None) if there aren't enough live sensors to trust.
+    Returns a dict {feature_name: np.ndarray aligned to inputs}, or None if there
+    aren't enough sensors to trust.
     """
     from sklearn.neighbors import BallTree
 
     if not sensors or len(sensors) < MIN_LIVE_SENSORS:
-        return None, None, None
+        return None
 
     s_lat = np.array([s["lat"] for s in sensors], dtype=np.float64)
     s_lon = np.array([s["lon"] for s in sensors], dtype=np.float64)
@@ -155,25 +165,41 @@ def compute_neighbor_features(tract_lats, tract_lons, sensors):
         np.asarray(tract_lons, dtype=np.float64),
     ]))
     tree = BallTree(s_coords, metric="haversine")
-    radius = NBR_RADIUS_KM / EARTH_R_KM
-    neighbors = tree.query_radius(t_coords, r=radius)
+    max_rad = max(NBR_RADII_KM) / EARTH_R_KM
+    ind, dist = tree.query_radius(t_coords, r=max_rad, return_distance=True)
 
     n = len(t_coords)
-    nbr_mean = np.full(n, np.nan)
-    nbr_count = np.zeros(n, dtype=np.int32)
-    nbr_std = np.zeros(n, dtype=np.float64)
-    for i, nb in enumerate(neighbors):
-        if len(nb) > 0:
-            vals = s_pm[nb]
-            nbr_mean[i] = float(vals.mean())
-            nbr_count[i] = int(len(nb))
-            nbr_std[i] = float(vals.std()) if len(nb) > 1 else 0.0
+    mean = {r: np.full(n, np.nan) for r in NBR_RADII_KM}
+    cnt = {r: np.zeros(n, dtype=np.int32) for r in NBR_RADII_KM}
+    std50 = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        nbrs = ind[i]
+        if len(nbrs) == 0:
+            continue
+        d_km = dist[i] * EARTH_R_KM
+        vals_all = s_pm[nbrs]
+        for r in NBR_RADII_KM:
+            m = d_km <= r
+            if not m.any():
+                continue
+            vr = vals_all[m]
+            mean[r][i] = float(vr.mean())
+            cnt[r][i] = int(len(vr))
+            if r == 50.0 and len(vr) > 1:
+                std50[i] = float(vr.std())
 
-    # Fallback: tracts with no neighbors get the live statewide same-day mean.
+    # Fallbacks (match training): 50km anchor -> statewide same-day mean; the
+    # finer/coarser radii fall back to the (filled) 50km value.
     statewide_mean = float(s_pm.mean())
-    nbr_mean = np.where(nbr_count > 0, nbr_mean, statewide_mean)
+    m50 = np.where(cnt[50.0] > 0, mean[50.0], statewide_mean)
+    m25 = np.where(cnt[25.0] > 0, mean[25.0], m50)
+    m100 = np.where(cnt[100.0] > 0, mean[100.0], m50)
 
-    return nbr_mean, nbr_count, nbr_std
+    return {
+        "nbr_pm25_25km": m25, "nbr_count_25km": cnt[25.0],
+        "nbr_pm25_50km": m50, "nbr_count_50km": cnt[50.0], "nbr_std_50km": std50,
+        "nbr_pm25_100km": m100, "nbr_count_100km": cnt[100.0],
+    }
 
 
 async def fetch_live_snapshot() -> dict:

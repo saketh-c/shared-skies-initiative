@@ -24,27 +24,27 @@ const TRANSLATIONS = {
       levels: {
         good: {
           name: "Good",
-          range: "0 – 8.9 µg/m³",
-          description: "Air quality is excellent. No health concerns for anyone. Ideal for outdoor activities and extended time outside.",
+          range: "0 – 5 µg/m³",
+          description: "At or below the WHO annual air-quality guideline (5 µg/m³). No health concerns for anyone — ideal for outdoor activities.",
           who: "Safe for everyone",
         },
         moderate: {
           name: "Moderate",
-          range: "9 – 12.9 µg/m³",
-          description: "Air quality is acceptable. The vast majority of people will not experience effects. A very small number of unusually sensitive individuals may notice minor symptoms.",
+          range: "5 – 9 µg/m³",
+          description: "Above the WHO annual guideline but within the U.S. EPA annual standard (9 µg/m³). Most people experience no effects; a few unusually sensitive individuals may notice minor symptoms.",
           who: "Unusually sensitive people: consider reducing prolonged outdoor exertion",
         },
-        unhealthy: {
-          name: "Unhealthy",
-          range: "13 – 17.9 µg/m³",
-          description: "Everyone may begin to experience health effects. Sensitive groups (people with asthma, heart disease, the elderly, and children) are at greater risk.",
-          who: "Sensitive groups: limit prolonged outdoor exertion. Everyone: reduce extended heavy outdoor activity.",
+        elevated: {
+          name: "Elevated",
+          range: "9 – 15 µg/m³",
+          description: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Long-term exposure at these levels is linked to cardiovascular and respiratory risk. Common in dense urban and industrial areas.",
+          who: "Sensitive groups (asthma, heart disease, elderly, children): limit prolonged outdoor exertion.",
         },
-        hazardous: {
-          name: "Hazardous",
-          range: "18+ µg/m³",
-          description: "Health warnings of emergency conditions. Serious aggravation of heart and lung disease, premature mortality in sensitive groups, and respiratory effects in the general population.",
-          who: "Everyone: avoid all outdoor physical activity. Sensitive groups: remain indoors.",
+        high: {
+          name: "High",
+          range: "15+ µg/m³",
+          description: "Above the WHO 24-hour guideline (15 µg/m³). Everyone may begin to experience effects; sensitive groups are at greater risk. Often driven by wildfire smoke or dust events.",
+          who: "Everyone: limit prolonged or heavy outdoor activity. Sensitive groups: stay indoors when possible.",
         },
       },
     },
@@ -142,27 +142,27 @@ const TRANSLATIONS = {
       levels: {
         good: {
           name: "Bueno",
-          range: "0 – 8.9 µg/m³",
-          description: "La calidad del aire es excelente. No hay preocupaciones de salud para nadie. Ideal para actividades al aire libre.",
+          range: "0 – 5 µg/m³",
+          description: "Igual o por debajo de la guía anual de calidad del aire de la OMS (5 µg/m³). Sin preocupaciones de salud para nadie — ideal para actividades al aire libre.",
           who: "Seguro para todos",
         },
         moderate: {
           name: "Moderado",
-          range: "9 – 12.9 µg/m³",
-          description: "La calidad del aire es aceptable. La gran mayoría de las personas no experimentará efectos. Un pequeño número de individuos inusualmente sensibles puede notar síntomas menores.",
+          range: "5 – 9 µg/m³",
+          description: "Por encima de la guía anual de la OMS pero dentro del estándar anual de la EPA de EE. UU. (9 µg/m³). La mayoría no experimenta efectos; algunos individuos inusualmente sensibles pueden notar síntomas menores.",
           who: "Personas sensibles: considere reducir el esfuerzo prolongado al aire libre",
         },
-        unhealthy: {
-          name: "Insalubre",
-          range: "13 – 17.9 µg/m³",
-          description: "Todas las personas pueden comenzar a experimentar efectos en la salud. Grupos sensibles (personas con asma, enfermedades cardíacas, ancianos y niños) tienen mayor riesgo.",
-          who: "Grupos sensibles: limitar el esfuerzo prolongado al aire libre. Todos: reducir actividad física intensa y prolongada.",
+        elevated: {
+          name: "Elevado",
+          range: "9 – 15 µg/m³",
+          description: "Por encima del estándar anual de PM2.5 de la EPA (9 µg/m³). La exposición prolongada a estos niveles se asocia con riesgo cardiovascular y respiratorio. Común en zonas urbanas densas e industriales.",
+          who: "Grupos sensibles (asma, enfermedades cardíacas, ancianos, niños): limitar el esfuerzo prolongado al aire libre.",
         },
-        hazardous: {
-          name: "Peligroso",
-          range: "18+ µg/m³",
-          description: "Avisos de salud por condiciones de emergencia. Agravamiento serio de enfermedades cardíacas y pulmonares, mortalidad prematura en grupos sensibles y efectos respiratorios en la población general.",
-          who: "Todos: eviten actividad física al aire libre. Grupos sensibles: permanezcan en interiores.",
+        high: {
+          name: "Alto",
+          range: "15+ µg/m³",
+          description: "Por encima de la guía de 24 horas de la OMS (15 µg/m³). Todos pueden comenzar a experimentar efectos; los grupos sensibles tienen mayor riesgo. A menudo causado por humo de incendios o eventos de polvo.",
+          who: "Todos: limitar la actividad al aire libre prolongada o intensa. Grupos sensibles: permanecer en interiores cuando sea posible.",
         },
       },
     },
@@ -241,29 +241,29 @@ const CATEGORY_MAP = {
   en: {
     Good: "Good",
     Moderate: "Moderate",
-    Unhealthy: "Unhealthy",
-    Hazardous: "Hazardous",
+    Elevated: "Elevated",
+    High: "High",
   },
   es: {
     Good: "Bueno",
     Moderate: "Moderado",
-    Unhealthy: "Insalubre",
-    Hazardous: "Peligroso",
+    Elevated: "Elevado",
+    High: "Alto",
   }
 };
 
 const HEALTH_MSG = {
   en: {
-    Good: "Air quality is good. Enjoy outdoor activities.",
-    Moderate: "Air quality is acceptable. Sensitive individuals should take precautions.",
-    Unhealthy: "Air quality is unhealthy. Everyone should limit outdoor exposure.",
-    Hazardous: "⚠️ Air quality is hazardous. Avoid all outdoor activities.",
+    Good: "At or below the WHO annual guideline (5 µg/m³). Air quality is good.",
+    Moderate: "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³).",
+    Elevated: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care.",
+    High: "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure.",
   },
   es: {
-    Good: "La calidad del aire es buena. Disfruta de actividades al aire libre.",
-    Moderate: "La calidad del aire es aceptable. Las personas sensibles deben tomar precauciones.",
-    Unhealthy: "La calidad del aire es insalubre. Todos deberían limitar la exposición al aire libre.",
-    Hazardous: "⚠️ La calidad del aire es peligrosa. Evita todas las actividades al aire libre.",
+    Good: "Igual o por debajo de la guía anual de la OMS (5 µg/m³). La calidad del aire es buena.",
+    Moderate: "Por encima de la guía anual de la OMS; dentro del estándar anual de la EPA de EE. UU. (9 µg/m³).",
+    Elevated: "Por encima del estándar anual de PM2.5 de la EPA (9 µg/m³). Los grupos sensibles deben tener cuidado.",
+    High: "⚠️ Por encima de la guía de 24 horas de la OMS (15 µg/m³). Todos deberían limitar la exposición prolongada al aire libre.",
   }
 };
 

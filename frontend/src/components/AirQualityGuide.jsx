@@ -3,16 +3,16 @@ import { LanguageContext } from "../App";
 import { t } from "../i18n";
 
 const COLOR_MAP = {
-  good:      "#10b981",
-  moderate:  "#f59e0b",
-  unhealthy: "#ef4444",
-  hazardous: "#7f1d1d",
+  good:     "#10b981",  // green
+  moderate: "#eab308",  // yellow/gold
+  elevated: "#e8590c",  // orange (above EPA annual std)
+  high:     "#b30000",  // red (above WHO 24-hr)
 };
 
 export default function AirQualityGuide() {
   const { lang } = useContext(LanguageContext);
 
-  const levels = ["good", "moderate", "unhealthy", "hazardous"].map((k) => ({
+  const levels = ["good", "moderate", "elevated", "high"].map((k) => ({
     key: k,
     name: t(lang, `guide.levels.${k}.name`),
     range: t(lang, `guide.levels.${k}.range`),

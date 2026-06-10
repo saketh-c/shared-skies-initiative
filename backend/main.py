@@ -707,62 +707,69 @@ def interpolate_color(color1, color2, factor):
 
 
 def pm25_color_gradient(pm25: float) -> str:
-    """Get gradient color based on PM2.5 value."""
+    """Get gradient color based on PM2.5 value.
+
+    Breakpoints are anchored to published annual/24-hr health standards so the
+    map is paper-defensible: 5 = WHO annual guideline, 9 = U.S. EPA annual NAAQS
+    (2024), 15 = WHO 24-hr guideline. Urban areas (~9-11 µg/m³) land in the
+    orange 'above-EPA-standard' band; clean rural air stays green/yellow.
+    """
     if pm25 < 0:
         pm25 = 0
 
-    # Green range: 0.0-8.9
-    if pm25 <= 8.9:
-        factor = pm25 / 8.9
+    # Green: 0.0-5.0  (at/below WHO annual guideline)
+    if pm25 <= 5.0:
+        factor = pm25 / 5.0
         return interpolate_color("#90EE90", "#00b894", factor)
 
-    # Yellow range: 9.0-12.9
-    elif pm25 <= 12.9:
-        factor = (pm25 - 9.0) / 3.9
+    # Yellow: 5.0-9.0  (above WHO annual, within EPA annual standard)
+    elif pm25 <= 9.0:
+        factor = (pm25 - 5.0) / 4.0
         return interpolate_color("#FFFF99", "#FFD700", factor)
 
-    # Red range: 13.0-17.9
-    elif pm25 <= 17.9:
-        factor = (pm25 - 13.0) / 4.9
-        return interpolate_color("#FF6B6B", "#d63031", factor)
+    # Orange: 9.0-15.0  (above EPA annual NAAQS of 9.0)
+    elif pm25 <= 15.0:
+        factor = (pm25 - 9.0) / 6.0
+        return interpolate_color("#FFB347", "#E8590C", factor)
 
-    # Dark red range: 18.0+ (gets darker as pollution rises, fully saturates at ~30)
+    # Red → dark red: 15.0+  (above WHO 24-hr guideline; darkens through the EPA
+    # 24-hr Unhealthy threshold so wildfire-smoke days read dramatically).
     else:
-        factor = min(1.0, (pm25 - 18.0) / 12.0)
-        return interpolate_color("#8b0000", "#1a0000", factor)
+        factor = min(1.0, (pm25 - 15.0) / 40.0)
+        return interpolate_color("#FF6B6B", "#800000", factor)
 
 
 def pm25_info(pm25: float) -> dict:
-    """Get AQI info with custom gradient scale."""
+    """Get category info on a standards-anchored scale (WHO 5 / EPA 9 / WHO 15)."""
     color = pm25_color_gradient(pm25)
 
-    if pm25 <= 8.9:
+    if pm25 <= 5.0:
         return {
             "category": "Good",
             "color": color,
-            "aqi_range": "0–8.9",
-            "health_msg": "Air quality is good. Enjoy outdoor activities.",
+            "aqi_range": "0–5",
+            "health_msg": "At or below the WHO annual guideline (5 µg/m³). Air quality is good.",
         }
-    elif pm25 <= 12.9:
+    elif pm25 <= 9.0:
         return {
             "category": "Moderate",
             "color": color,
-            "aqi_range": "9–12.9",
-            "health_msg": "Air quality is acceptable. Sensitive individuals should take precautions.",
+            "aqi_range": "5–9",
+            "health_msg": "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³).",
         }
-    elif pm25 <= 17.9:
+    elif pm25 <= 15.0:
         return {
-            "category": "Unhealthy",
+            "category": "Elevated",
             "color": color,
-            "aqi_range": "13–17.9",
-            "health_msg": "Air quality is unhealthy. Everyone should limit outdoor exposure.",
+            "aqi_range": "9–15",
+            "health_msg": "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care.",
         }
     else:
         return {
-            "category": "Hazardous",
+            "category": "High",
             "color": color,
-            "aqi_range": "18+",
-            "health_msg": "⚠️ Air quality is hazardous. Avoid all outdoor activities.",
+            "aqi_range": "15+",
+            "health_msg": "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure.",
         }
 
 

@@ -69,8 +69,8 @@ const PM25Hero = memo(function PM25Hero({ pm25, color, category, lang }) {
         <div className="gauge-labels">
           <span>{translateCategory(lang, "Good")}</span>
           <span>{translateCategory(lang, "Moderate")}</span>
-          <span>{translateCategory(lang, "Unhealthy")}</span>
-          <span>{translateCategory(lang, "Hazardous")}</span>
+          <span>{translateCategory(lang, "Elevated")}</span>
+          <span>{translateCategory(lang, "High")}</span>
         </div>
       </div>
     </>

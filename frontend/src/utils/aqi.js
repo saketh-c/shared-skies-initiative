@@ -1,46 +1,52 @@
 /**
- * PM2.5 → AQI category utilities with custom gradient color scale.
+ * PM2.5 → category utilities with a STANDARDS-ANCHORED gradient color scale.
+ *
+ * Breakpoints map to published health standards so the map is paper-defensible:
+ *   5  = WHO annual guideline
+ *   9  = U.S. EPA annual NAAQS (2024)
+ *   15 = WHO 24-hour guideline
  *
  * Scale:
- * 0.0-8.9:   Green gradient (light → dark)
- * 9.0-12.9:  Yellow gradient (light → dark)
- * 13.0-17.9: Red gradient (light → dark)
- * 18.0+:     Dark red → near-black (darker as pollution rises)
+ * 0.0-5.0:  Green  (at/below WHO annual)            "Good"
+ * 5.0-9.0:  Yellow (WHO–EPA annual band)            "Moderate"
+ * 9.0-15.0: Orange (above EPA annual standard)      "Elevated"
+ * 15.0+:    Red → dark red (above WHO 24-hr)        "High"
+ * MUST stay in sync with backend/main.py pm25_color_gradient/pm25_info.
  */
 
 // Color gradients with smooth transitions
 const COLOR_SCALE = {
   goodRange: {
     min: 0.0,
-    max: 8.9,
+    max: 5.0,
     colorMin: "#90EE90",  // Light green
     colorMax: "#00b894",  // Darker green
     category: "Good",
-    label: "0–8.9 µg/m³"
+    label: "0–5 µg/m³"
   },
   moderateRange: {
-    min: 9.0,
-    max: 12.9,
+    min: 5.0,
+    max: 9.0,
     colorMin: "#FFFF99",  // Light yellow
     colorMax: "#FFD700",  // Darker yellow/gold
     category: "Moderate",
-    label: "9–12.9 µg/m³"
+    label: "5–9 µg/m³"
   },
-  unhealthyRange: {
-    min: 13.0,
-    max: 17.9,
-    colorMin: "#FF6B6B",  // Light red
-    colorMax: "#d63031",  // Darker red
-    category: "Unhealthy",
-    label: "13–17.9 µg/m³"
+  elevatedRange: {
+    min: 9.0,
+    max: 15.0,
+    colorMin: "#FFB347",  // Light orange
+    colorMax: "#E8590C",  // Burnt orange
+    category: "Elevated",
+    label: "9–15 µg/m³"
   },
-  hazardousRange: {
-    min: 18.0,
+  highRange: {
+    min: 15.0,
     max: Infinity,
-    colorMin: "#8b0000",   // Dark red
-    colorMax: "#1a0000",   // Near-black dark red (gets darker as pollution rises)
-    category: "Hazardous",
-    label: "18+ µg/m³"
+    colorMin: "#FF6B6B",   // Red
+    colorMax: "#800000",   // Dark red (darkens as pollution rises; saturates ~55)
+    category: "High",
+    label: "15+ µg/m³"
   }
 };
 
@@ -111,24 +117,24 @@ export function pm25Color(pm25) {
     );
   }
 
-  if (pm25 <= COLOR_SCALE.unhealthyRange.max) {
-    // Interpolate within red range
-    const factor = (pm25 - COLOR_SCALE.unhealthyRange.min) /
-                   (COLOR_SCALE.unhealthyRange.max - COLOR_SCALE.unhealthyRange.min);
+  if (pm25 <= COLOR_SCALE.elevatedRange.max) {
+    // Interpolate within orange range (9–15, above EPA annual standard)
+    const factor = (pm25 - COLOR_SCALE.elevatedRange.min) /
+                   (COLOR_SCALE.elevatedRange.max - COLOR_SCALE.elevatedRange.min);
     return interpolateColor(
-      COLOR_SCALE.unhealthyRange.colorMin,
-      COLOR_SCALE.unhealthyRange.colorMax,
+      COLOR_SCALE.elevatedRange.colorMin,
+      COLOR_SCALE.elevatedRange.colorMax,
       factor
     );
   }
 
-  // Hazardous (18+) - dark red that gets darker as pollution increases
-  // Fully saturates (near-black) at ~30 µg/m³ and above
-  const hazardousFactor = Math.min(1.0, (pm25 - 18.0) / 12.0);
+  // High (15+) - red that darkens as pollution rises (saturates ~55, so
+  // wildfire-smoke days read dramatically dark).
+  const highFactor = Math.min(1.0, (pm25 - 15.0) / 40.0);
   return interpolateColor(
-    COLOR_SCALE.hazardousRange.colorMin,
-    COLOR_SCALE.hazardousRange.colorMax,
-    hazardousFactor
+    COLOR_SCALE.highRange.colorMin,
+    COLOR_SCALE.highRange.colorMax,
+    highFactor
   );
 }
 
@@ -143,7 +149,7 @@ export function getAQIInfo(pm25) {
       bg: "rgba(144, 238, 144, 0.12)",
       label: COLOR_SCALE.goodRange.label,
       aqi_range: "Good",
-      health_msg: "Air quality is good. Enjoy outdoor activities."
+      health_msg: "At or below the WHO annual guideline (5 µg/m³). Air quality is good."
     };
   }
 
@@ -154,29 +160,29 @@ export function getAQIInfo(pm25) {
       bg: "rgba(255, 255, 153, 0.12)",
       label: COLOR_SCALE.moderateRange.label,
       aqi_range: "Moderate",
-      health_msg: "Air quality is acceptable. Sensitive individuals should take precautions."
+      health_msg: "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³)."
     };
   }
 
-  if (pm25 <= COLOR_SCALE.unhealthyRange.max) {
+  if (pm25 <= COLOR_SCALE.elevatedRange.max) {
     return {
-      category: COLOR_SCALE.unhealthyRange.category,
+      category: COLOR_SCALE.elevatedRange.category,
       color: pm25Color(pm25),
-      bg: "rgba(255, 107, 107, 0.12)",
-      label: COLOR_SCALE.unhealthyRange.label,
-      aqi_range: "Unhealthy",
-      health_msg: "Air quality is unhealthy. Everyone should limit outdoor exposure."
+      bg: "rgba(232, 89, 12, 0.12)",
+      label: COLOR_SCALE.elevatedRange.label,
+      aqi_range: "Elevated",
+      health_msg: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care."
     };
   }
 
-  // Hazardous
+  // High (above WHO 24-hr guideline)
   return {
-    category: COLOR_SCALE.hazardousRange.category,
+    category: COLOR_SCALE.highRange.category,
     color: pm25Color(pm25),
-    bg: "rgba(139, 0, 0, 0.12)",
-    label: COLOR_SCALE.hazardousRange.label,
-    aqi_range: "Hazardous",
-    health_msg: "⚠️ Air quality is hazardous. Avoid all outdoor activities."
+    bg: "rgba(128, 0, 0, 0.12)",
+    label: COLOR_SCALE.highRange.label,
+    aqi_range: "High",
+    health_msg: "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure."
   };
 }
 
@@ -194,8 +200,8 @@ export function healthIcon(category) {
   const icons = {
     "Good": "✓",
     "Moderate": "~",
-    "Unhealthy": "!",
-    "Hazardous": "✕",
+    "Elevated": "!",
+    "High": "✕",
   };
   return icons[category] ?? "?";
 }
@@ -204,8 +210,8 @@ export function healthIcon(category) {
  * Export breakpoints for legend display
  */
 export const BREAKPOINTS = [
-  { max: 8.9,   category: "Good",      color: "#00b894", label: "0–8.9" },
-  { max: 12.9,  category: "Moderate",  color: "#FFD700", label: "9–12.9" },
-  { max: 17.9,  category: "Unhealthy", color: "#d63031", label: "13–17.9" },
-  { max: Infinity, category: "Hazardous", color: "#8b0000", label: "18+" },
+  { max: 5.0,   category: "Good",     color: "#00b894", label: "0–5" },
+  { max: 9.0,   category: "Moderate", color: "#FFD700", label: "5–9" },
+  { max: 15.0,  category: "Elevated", color: "#E8590C", label: "9–15" },
+  { max: Infinity, category: "High",  color: "#b30000", label: "15+" },
 ];

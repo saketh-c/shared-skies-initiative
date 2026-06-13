@@ -1,54 +1,54 @@
 {
   "random_split": {
-    "test_size": 80142,
-    "train_size": 320568,
+    "test_size": 57160,
+    "train_size": 228638,
     "rf": {
-      "rmse": 3.6778,
-      "r2": 0.78,
-      "mae": 2.2201
+      "rmse": 3.7141,
+      "r2": 0.7786,
+      "mae": 2.229
     },
     "lgbm": {
-      "rmse": 3.0619,
-      "r2": 0.8475,
-      "mae": 1.6803
+      "rmse": 3.048,
+      "r2": 0.8509,
+      "mae": 1.612
     },
     "xgb": {
-      "rmse": 3.1234,
-      "r2": 0.8413,
-      "mae": 1.746
+      "rmse": 3.0947,
+      "r2": 0.8463,
+      "mae": 1.669
     },
     "cat": {
-      "rmse": 3.2585,
-      "r2": 0.8273,
-      "mae": 1.8662
+      "rmse": 3.2325,
+      "r2": 0.8323,
+      "mae": 1.7908
     },
     "ensemble": {
-      "rmse": 3.1841,
-      "r2": 0.8351,
-      "mae": 1.7914
+      "rmse": 3.1646,
+      "r2": 0.8392,
+      "mae": 1.7211
     }
   },
   "loso_cv": {
-    "rmse": 4.2142,
-    "mae": 2.6023,
-    "r2": 0.7068,
-    "n_sites": 427,
+    "rmse": 4.2218,
+    "mae": 2.6176,
+    "r2": 0.7126,
+    "n_sites": 310,
     "note": "SUPERSEDED inverse-MSE baseline (NOT the deployed blend). The deployed model uses the simplex-convex weights in loso_cv_optimized; read loso_cv_optimized.r2 for the headline LOSO number."
   },
   "loso_cv_optimized": {
-    "r2": 0.7102,
+    "r2": 0.7136,
     "config": "simplex_4model",
     "weights": {
-      "rf": 0.7755,
-      "lgbm": 0.1768,
-      "xgb": 0.0477,
-      "cat": 0.0
+      "rf": 0.6827,
+      "lgbm": 0.0079,
+      "xgb": 0.0,
+      "cat": 0.3094
     },
     "method": "simplex-constrained convex combiner, GroupKFold-over-sensors cross-fit"
   },
   "ensemble_weight_optimization": {
-    "n_oof_rows": 400710,
-    "n_sensors": 427,
+    "n_oof_rows": 285798,
+    "n_sensors": 310,
     "models": [
       "rf",
       "lgbm",
@@ -56,21 +56,21 @@
       "cat"
     ],
     "single_model_r2": {
-      "rf": 0.7098,
-      "lgbm": 0.7006,
-      "xgb": 0.6994,
-      "cat": 0.6967
+      "rf": 0.7138,
+      "lgbm": 0.7031,
+      "xgb": 0.7022,
+      "cat": 0.7078
     },
-    "equal_weight_r2": 0.7059,
-    "inverse_mse_r2": 0.7068,
-    "simplex_4model_grouped_cv_r2": 0.7102,
-    "simplex_4model_insample_r2": 0.7106,
-    "nnls_4model_grouped_cv_r2": 0.7103,
+    "equal_weight_r2": 0.7114,
+    "inverse_mse_r2": 0.7126,
+    "simplex_4model_grouped_cv_r2": 0.7136,
+    "simplex_4model_insample_r2": 0.7155,
+    "nnls_4model_grouped_cv_r2": 0.7133,
     "simplex_4model_weights": {
-      "rf": 0.7755,
-      "lgbm": 0.1768,
-      "xgb": 0.0477,
-      "cat": 0.0
+      "rf": 0.6827,
+      "lgbm": 0.0079,
+      "xgb": 0.0,
+      "cat": 0.3094
     },
     "drop_rf": {
       "models": [
@@ -79,23 +79,23 @@
         "cat"
       ],
       "weights": {
-        "lgbm": 0.5378,
-        "xgb": 0.2672,
-        "cat": 0.1951
+        "lgbm": 0.2396,
+        "xgb": 0.0,
+        "cat": 0.7604
       },
-      "grouped_cv_r2": 0.7008,
-      "insample_r2": 0.7015
+      "grouped_cv_r2": 0.7083,
+      "insample_r2": 0.7083
     },
     "chosen_config": "simplex_4model",
     "chosen_weights": {
-      "rf": 0.7755,
-      "lgbm": 0.1768,
-      "xgb": 0.0477,
-      "cat": 0.0
+      "rf": 0.6827,
+      "lgbm": 0.0079,
+      "xgb": 0.0,
+      "cat": 0.3094
     },
-    "chosen_grouped_cv_r2": 0.7102,
+    "chosen_grouped_cv_r2": 0.7136,
     "best_single_model": "rf",
-    "best_single_model_r2": 0.7098
+    "best_single_model_r2": 0.7138
   },
   "features": [
     "humidity",

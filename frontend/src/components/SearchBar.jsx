@@ -52,8 +52,15 @@ export default function SearchBar({ onSearch, loading }) {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(async () => {
       try {
+        // Geocoding via the public Nominatim endpoint. We send Accept-Language
+        // (a CORS-safelisted header — no preflight) so results match the UI
+        // language. Note: browsers FORBID setting a custom User-Agent, so we
+        // can't add the descriptive UA Nominatim's usage policy requests; the
+        // deployed site's Referer identifies it instead. For high-volume
+        // production use, proxy this through the backend with a proper UA.
         const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchInput + ", Texas")}&limit=5`
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchInput + ", Texas")}&limit=5`,
+          { headers: { "Accept-Language": lang === "es" ? "es" : "en" } }
         );
         const results = await response.json();
         setSuggestions(results);
@@ -116,7 +123,8 @@ export default function SearchBar({ onSearch, loading }) {
         setIsSearching(true);
         try {
           const response = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchInput + ", Texas")}&limit=1`
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchInput + ", Texas")}&limit=1`,
+            { headers: { "Accept-Language": lang === "es" ? "es" : "en" } }
           );
           const results = await response.json();
           if (results.length > 0) {

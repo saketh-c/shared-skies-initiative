@@ -232,11 +232,17 @@ export function pm25ToEpaAqi(pm25) {
 }
 
 /**
- * Export breakpoints for legend display
+ * Export breakpoints for legend display.
+ *
+ * Swatch colors are sampled straight from the gradient (pm25Color) so the map
+ * legend, the SidePanel distribution dots, and the choropleth always agree.
+ * Good/Moderate/Elevated use each band's upper-edge color; High samples a
+ * mid-band red since that band is open-ended. (Previously the High swatch was a
+ * hardcoded #b30000 that the gradient never actually produces at any value.)
  */
 export const BREAKPOINTS = [
-  { max: 6.0,   category: "Good",     color: "#00b894", label: "0–6" },
-  { max: 9.0,   category: "Moderate", color: "#FFD700", label: "6–9" },
-  { max: 15.0,  category: "Elevated", color: "#E8590C", label: "9–15" },
-  { max: Infinity, category: "High",  color: "#b30000", label: "15+" },
+  { max: 6.0,      category: "Good",     color: pm25Color(6),  label: "0–6" },
+  { max: 9.0,      category: "Moderate", color: pm25Color(9),  label: "6–9" },
+  { max: 15.0,     category: "Elevated", color: pm25Color(15), label: "9–15" },
+  { max: Infinity, category: "High",     color: pm25Color(35), label: "15+" },
 ];

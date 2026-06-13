@@ -1,28 +1,36 @@
 """Live PurpleAir sensor fetcher + same-day neighbor-feature computation.
 
-The v3b model's single most important feature (nbr_pm25_50km, ~37% of total
-importance) is the mean PM2.5 of OTHER sensors within 50km ON THE SAME DAY.
-At training (pipeline/03_train_enhanced.py) this is computed per (sensor, date)
-with a BallTree over that day's readings. To reproduce it at inference WITHOUT
-train/serve skew, the backend must use LIVE same-day PurpleAir readings — not a
-static historical mean.
+The v6 model's single most important feature group is the same-day MULTI-RADIUS
+neighbor PM2.5 (nbr_pm25_25km / nbr_pm25_50km / nbr_pm25_100km; the 50km anchor
+alone is ~37% of total feature importance) — the mean PM2.5 of OTHER sensors
+within 25 / 50 / 100 km ON THE SAME DAY. At training (pipeline/03_train_enhanced.py)
+this is computed per (sensor, date) with a BallTree over that day's readings. To
+reproduce it at inference WITHOUT train/serve skew, the backend must use LIVE
+same-day PurpleAir readings — not a static historical mean.
 
 This module:
   1. fetch_live_sensors(): one bounding-box call to PurpleAir's /v1/sensors
      live endpoint for all outdoor Texas sensors, QC'd to fresh + trustworthy.
   2. compute_neighbor_features(): replicates the training BallTree computation
      with census-tract centroids as query points and live sensors as the
-     reference set, returning (nbr_pm25_50km, nbr_count_50km, nbr_std_50km).
+     reference set, returning the full multi-radius feature dict (nbr_pm25_ +
+     nbr_count_ at 25/50/100km, plus nbr_std_50km).
 
-CRITICAL correctness notes:
-  - Use pm2.5_atm, the raw ATM-channel mass conc. Training used pm2.5_atm
-    (pipeline/06 PA_HISTORY_FIELDS) renamed straight to the model target.
-    Do NOT apply the EPA Barkjohn correction here — training data was raw.
-  - 50km radius == 50.0/6371.0 radians on a haversine BallTree, identical to
-    training (pipeline/03 line ~314).
-  - Fallback for tracts with zero live neighbors == live statewide same-day
-    mean, matching training's groupby(date) statewide-mean fallback. NO 100km
-    widening tier (training never widened — adding one is train/serve skew).
+CRITICAL correctness notes (these MUST track pipeline/03_train_enhanced.py):
+  - PM2.5 field: use pm2.5_24hour (the 24-hour rolling average of the raw ATM
+    channel), falling back to instantaneous pm2.5_atm only when it is missing.
+    Training pulls daily means (PurpleAir history average=1440), so the 24h
+    rolling average is the train-consistent semantics and it smooths single-
+    reading sensor glitches. Do NOT apply the EPA Barkjohn correction — the
+    training target was the raw ATM mass concentration.
+  - MULTI-RADIUS: NBR_RADII_KM = [25, 50, 100], each r/6371.0 radians on a
+    haversine BallTree, byte-identical to training's RADII_KM (pipeline/03).
+    Query ONCE at the 100km max radius WITH distances, then mask per radius.
+  - Zero-neighbor fallback: the 50km anchor falls back to the live statewide
+    same-day mean; the 25km/100km radii fall back to the (filled) 50km value.
+    (Training's analogous fallback is the same-day statewide LEAVE-ONE-OUT mean;
+    inference can't do true leave-one-out because the query points are tracts,
+    not sensors, so the plain statewide same-day mean is the closest match.)
 """
 import os
 import time
@@ -46,7 +54,6 @@ MIN_CONFIDENCE = 50          # PurpleAir A/B channel agreement score
 MIN_LIVE_SENSORS = 20        # below this we don't trust the live snapshot
 
 EARTH_R_KM = 6371.0
-NBR_RADIUS_KM = 50.0
 
 
 # Fallback READ key so the live path works out-of-the-box on Render without a

@@ -451,8 +451,10 @@ def solve_quantum(tracts, k=25, num_reads=500, top_candidates=120,
         "selected_tracts": selected_tracts,
         "num_sensors": len(selected_tracts),
         "num_candidates": len(candidate_idx),
-        "num_reads": num_reads * 3,  # 3 multi-start runs
-        "num_sweeps": 2000,
+        # Multi-start annealing: the loop above runs 5 seeds, each drawing
+        # `num_reads` samples at `num_sweeps` sweeps. Report the true totals.
+        "num_reads": num_reads * 5,  # 5 multi-start seeds × num_reads each
+        "num_sweeps": 2500,
         "best_energy": float(best_energy),
         "timing": {
             "scoring_ms": round((t_scores - t_start) * 1000, 1),

@@ -521,10 +521,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Shared Skies API", lifespan=lifespan)
 
+# CORS. This is a PUBLIC, read-only data API that the map frontend (Vercel) and
+# any embedder fetch cross-origin, so the default stays permissive ("*"). To lock
+# it down WITHOUT a code change, set ALLOWED_ORIGINS in the environment to a
+# comma-separated allowlist, e.g.
+#   ALLOWED_ORIGINS=https://sharedskiesinitiative.org,https://shared-skies-initiative.vercel.app
+# NOTE: CORS is a browser-enforced READ guard — it does NOT stop a script/curl
+# from POSTing /api/visit, so it is not what protects the visit counter (the
+# 10-minute public display cache does that). Methods are limited to the verbs the
+# API actually serves.
+_origins_env = os.environ.get("ALLOWED_ORIGINS", "").strip()
+ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD"],
     allow_headers=["*"],
 )
 
@@ -672,6 +683,18 @@ def get_temporal(tz: str = "America/Chicago") -> dict:
     }
 
 
+_ZERO_WEIGHT_EPS = 1e-12
+
+
+def _active_models(weights: dict, models) -> list:
+    """Model names with non-negligible ensemble weight. Skips zero-weight models
+    (e.g. CatBoost at weight 0.0 in the v6 simplex blend) so we don't pay for a
+    .predict() call + its RAM that contributes nothing on the 512MB free tier.
+    The weighted sum is numerically identical with the zero-weight terms removed."""
+    active = [n for n in models if abs(weights.get(n, 0.0)) > _ZERO_WEIGHT_EPS]
+    return active or list(models)  # defensive: never return an empty model set
+
+
 def run_prediction(tract_row: pd.Series, weather: dict, temporal: dict) -> float:
     bundle = state["bundle"]
     features = bundle["feature_names"]
@@ -699,7 +722,7 @@ def run_prediction(tract_row: pd.Series, weather: dict, temporal: dict) -> float
         row.setdefault("dist_to_border", abs(float(tract_row.get("lat", 31)) - 26.0))
 
     X = np.array([[row.get(f, 0.0) for f in features]])
-    pred = sum(weights[n] * models[n].predict(X)[0] for n in models)
+    pred = sum(weights[n] * models[n].predict(X)[0] for n in _active_models(weights, models))
     return max(0.0, float(pred))
 
 
@@ -842,7 +865,7 @@ def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np
         else:
             X[:, i] = fill  # feature entirely absent -> training fill, not 0
 
-    preds = sum(weights[name] * models[name].predict(X) for name in models)
+    preds = sum(weights[name] * models[name].predict(X) for name in _active_models(weights, models))
     # v3 models fit on log1p(pm25); invert before returning. Pre-v3 bundles
     # don't have this key so this is a no-op for them.
     if bundle.get("target_transform") == "log1p":
@@ -1661,7 +1684,7 @@ def _compute_model_disagreement(df: pd.DataFrame, weather: dict, temporal: dict)
                 X[:, i] = shared[feat]
             elif feat in df.columns:
                 X[:, i] = pd.to_numeric(df[feat], errors="coerce").fillna(0.0).values
-        raw = sum(weights[name] * models_dict[name].predict(X) for name in models_dict)
+        raw = sum(weights[name] * models_dict[name].predict(X) for name in _active_models(weights, models_dict))
         if bundle.get("target_transform") == "log1p":
             raw = np.expm1(raw)
         return np.maximum(0.0, raw)

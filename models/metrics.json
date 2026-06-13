@@ -33,7 +33,7 @@
     "mae": 2.6023,
     "r2": 0.7068,
     "n_sites": 427,
-    "note": "pooled out-of-fold R\u00b2 with inverse-MSE blend (v4 baseline)"
+    "note": "SUPERSEDED inverse-MSE baseline (NOT the deployed blend). The deployed model uses the simplex-convex weights in loso_cv_optimized; read loso_cv_optimized.r2 for the headline LOSO number."
   },
   "loso_cv_optimized": {
     "r2": 0.7102,

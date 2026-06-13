@@ -484,9 +484,15 @@ def main():
 def _update_metrics(ml_r2, ml_rmse, ml_mae, best, delta, reason):
     mp = MODELS_DIR / "metrics.json"
     metrics = json.load(open(mp)) if mp.exists() else {}
-    metrics["loso_cv"] = {
-        **metrics.get("loso_cv", {}),
+    # IMPORTANT: this geostats experiment trains its OWN reduced-feature RF (see
+    # FEATURES at the top of this file — ~27 features, NO neighbor/HMS/AOD/
+    # spatial-context features). Its LOSO numbers are NOT the deployed v6 model's.
+    # Write them under a dedicated key so we never clobber 03_train_enhanced.py's
+    # headline metrics["loso_cv"] / metrics["loso_cv_optimized"] (the prior bug).
+    metrics["geostats_baseline"] = {
+        **metrics.get("geostats_baseline", {}),
         "r2": round(ml_r2, 4), "rmse": round(ml_rmse, 4), "mae": round(ml_mae, 4),
+        "note": "geostats-experiment reduced-feature RF LOSO baseline — NOT the deployed model",
     }
     if best is not None:
         metrics["loso_hybrid"] = {

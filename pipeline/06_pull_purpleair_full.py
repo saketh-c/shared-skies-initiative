@@ -50,10 +50,14 @@ BUDGET_LEDGER = CACHE_DIR / "budget_ledger.json"
 # Texas bounding box (covers the whole state; we filter by FIPS later).
 TX_BBOX = dict(nwlng=-106.65, nwlat=36.5, selng=-93.5, selat=25.84)
 
-# Pull window. Today is 2026-05-03. Earliest possible chunk start is anchored
-# to each sensor's date_created. Latest chunk ends "yesterday" so we don't pull
-# a partial day.
-TODAY = date(2026, 5, 3)
+# Pull window. TODAY is the actual run date so re-running always advances the
+# window to the present (it used to be hardcoded to 2026-05-03, which silently
+# froze the dataset 6 weeks behind no matter when you re-ran). Earliest possible
+# chunk start is anchored to each sensor's date_created. Latest chunk ends
+# "yesterday" so we don't pull a partial day. Override TODAY with the
+# PURPLEAIR_PULL_TODAY env var (YYYY-MM-DD) for reproducible/backfill runs.
+_pull_today_env = os.environ.get("PURPLEAIR_PULL_TODAY", "").strip()
+TODAY = date.fromisoformat(_pull_today_env) if _pull_today_env else date.today()
 EARLIEST_START = date(2021, 1, 1)
 LATEST_END = TODAY - timedelta(days=1)
 

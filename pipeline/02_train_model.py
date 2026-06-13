@@ -1,9 +1,18 @@
 """
-02_train_model.py
-Trains an RF + LightGBM + XGBoost ensemble on p2_processed.xls.
-Saves the model bundle to models/ensemble.joblib.
+02_train_model.py  -- SUPERSEDED: legacy v1 trainer, kept for reference only.
 
-Run from the project root:
+This is the ORIGINAL 17-feature, 3-model (RF + LightGBM + XGBoost) trainer from
+p2_processed.xls. The PRODUCTION model is now trained by 03_train_enhanced.py
+(38 features, 4 models, multi-radius neighbors, LOSO-optimized weights), which
+writes models/ensemble.joblib + models/feature_names.json.
+
+To avoid silently clobbering the deployed v6 bundle with an incompatible
+17-feature one (which the backend, expecting 38 features + feature_fill, would
+mis-serve or crash on), this script now writes to
+models/ensemble_v1_legacy.joblib / models/feature_names_v1_legacy.json — NOT the
+production paths. It will NOT overwrite the deployed model.
+
+Run from the project root (legacy / comparison use only):
     python pipeline/02_train_model.py
 """
 
@@ -211,13 +220,18 @@ if __name__ == "__main__":
         "feature_names": FEATURES,
     }
 
-    out_path = os.path.join(MODELS_DIR, "ensemble.joblib")
+    # Write to LEGACY paths so this superseded v1 trainer can NEVER clobber the
+    # production v6 bundle written by 03_train_enhanced.py (different feature
+    # contract — overwriting models/ensemble.joblib would break the backend).
+    out_path = os.path.join(MODELS_DIR, "ensemble_v1_legacy.joblib")
     joblib.dump(bundle, out_path)
-    print(f"\nSaved model bundle → {out_path}")
+    print(f"\nSaved LEGACY v1 model bundle → {out_path}")
+    print("  (NOT the deployed model — 03_train_enhanced.py owns models/ensemble.joblib.)")
 
     # Also save feature names as JSON for easy inspection
-    feat_path = os.path.join(MODELS_DIR, "feature_names.json")
+    feat_path = os.path.join(MODELS_DIR, "feature_names_v1_legacy.json")
     with open(feat_path, "w") as f:
         json.dump(FEATURES, f, indent=2)
-    print(f"Saved feature list  → {feat_path}")
-    print("\nAll done! Run the backend next: uvicorn backend.main:app --reload")
+    print(f"Saved LEGACY feature list  → {feat_path}")
+    print("\nDone. This is the legacy v1 model; the backend serves "
+          "models/ensemble.joblib from 03_train_enhanced.py.")

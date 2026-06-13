@@ -13,6 +13,7 @@ Run from project root:
 """
 
 import os
+import sys
 import json
 import warnings
 import time
@@ -41,6 +42,13 @@ DATA_DIR = ROOT
 MODELS_DIR = os.path.join(ROOT, "models")
 PIPELINE_DIR = os.path.join(ROOT, "pipeline")
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+# Shared neighbor-feature computation — single source of truth used by both the
+# deployed-model feature build (pool = full dataset) and the LOSO leave-one-site
+# -out recompute (pool = all sensors except the held-out one). pipeline/ is on
+# sys.path when run as a script; add it explicitly so other-cwd / import runs work.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from neighbor_features import compute_neighbor_features_df
 
 TARGET = "pm25"
 
@@ -348,71 +356,17 @@ def load_data():
     #   2. statewide PM2.5 grand mean (last resort)
     print("Engineering same-day MULTI-RADIUS neighbor PM features (this takes a minute)...")
     if {"latitude", "longitude", "date", TARGET, "sensor_id"} <= set(df.columns):
-        from sklearn.neighbors import BallTree
-        EARTH_R_KM = 6371.0
-        # A-priori multi-scale radii (NOT tuned). The model gets local (25km),
-        # regional (50km, the anchor), and broad (100km) same-day spatial context.
-        # These radii MUST be mirrored byte-identically in backend/purpleair.py.
-        RADII_KM = [25.0, 50.0, 100.0]
-        max_rad_rad = max(RADII_KM) / EARTH_R_KM
-
-        nbr_mean = {r: np.full(len(df), np.nan) for r in RADII_KM}
-        nbr_cnt = {r: np.zeros(len(df), dtype=np.int32) for r in RADII_KM}
-        nbr_std50 = np.zeros(len(df), dtype=np.float64)  # std kept at the anchor only
-
-        # Vectorize per-date: build one BallTree per day, query all rows at once.
-        df_idx = df.reset_index(drop=False).rename(columns={"index": "_row"})
-        coords_rad = np.radians(df_idx[["latitude", "longitude"]].values)
-        pm_arr = df_idx[TARGET].values
-        row_arr = df_idx["_row"].values
-
-        for date_val, grp in df_idx.groupby("date"):
-            g_idx = grp.index.values  # positions within df_idx
-            if len(g_idx) < 2:
-                continue
-            g_coords = coords_rad[g_idx]
-            g_pm = pm_arr[g_idx]
-            g_rows = row_arr[g_idx]
-            tree = BallTree(g_coords, metric="haversine")
-            # Query ONCE at the largest radius WITH distances, then mask to each
-            # radius — exact (haversine distances) and one query per point.
-            ind, dist = tree.query_radius(g_coords, r=max_rad_rad, return_distance=True)
-            for i in range(len(g_coords)):
-                nbrs = ind[i]
-                d_km = dist[i] * EARTH_R_KM
-                keep = nbrs != i
-                nbrs = nbrs[keep]
-                d_km = d_km[keep]
-                if len(nbrs) == 0:
-                    continue
-                vals_all = g_pm[nbrs]
-                for r in RADII_KM:
-                    m = d_km <= r
-                    if not m.any():
-                        continue
-                    vr = vals_all[m]
-                    nbr_mean[r][g_rows[i]] = vr.mean()
-                    nbr_cnt[r][g_rows[i]] = len(vr)
-                    if r == 50.0 and len(vr) > 1:
-                        nbr_std50[g_rows[i]] = vr.std()
-
-        df["nbr_pm25_25km"] = nbr_mean[25.0]
-        df["nbr_count_25km"] = nbr_cnt[25.0]
-        df["nbr_pm25_50km"] = nbr_mean[50.0]
-        df["nbr_count_50km"] = nbr_cnt[50.0]
-        df["nbr_std_50km"] = nbr_std50
-        df["nbr_pm25_100km"] = nbr_mean[100.0]
-        df["nbr_count_100km"] = nbr_cnt[100.0]
-
-        # Zero-neighbor fallbacks. Base = same-day statewide LEAVE-ONE-OUT mean
-        # (excludes self → strictly LOSO-honest). The 50km anchor uses it; the
-        # finer/coarser radii first fall back to the (filled) 50km value.
-        grp_sum = df.groupby("date")[TARGET].transform("sum")
-        grp_cnt = df.groupby("date")[TARGET].transform("count")
-        loo_day_mean = (grp_sum - df[TARGET]) / (grp_cnt - 1).clip(lower=1)
-        df["nbr_pm25_50km"] = df["nbr_pm25_50km"].fillna(loo_day_mean).fillna(df[TARGET].mean())
-        df["nbr_pm25_25km"] = df["nbr_pm25_25km"].fillna(df["nbr_pm25_50km"])
-        df["nbr_pm25_100km"] = df["nbr_pm25_100km"].fillna(df["nbr_pm25_50km"])
+        # Single source of truth (pipeline/neighbor_features.py). Here the pool IS
+        # the full dataset, so the DEPLOYED model trains on neighbor features built
+        # from every sensor — local (25km) + regional anchor (50km) + broad
+        # (100km) same-day context. The radii MUST stay mirrored byte-identically
+        # in backend/purpleair.py. loso_cv() calls the SAME function with the
+        # held-out sensor removed from the pool (the leave-one-site-out fix), and
+        # pipeline/test_loso_neighbors.py proves this reproduces the prior inline
+        # computation exactly.
+        _nbr = compute_neighbor_features_df(df, df, target_col=TARGET)
+        for _col, _arr in _nbr.items():
+            df[_col] = _arr
 
         for r_km in (25, 50, 100):
             cov = (df[f"nbr_count_{r_km}km"] > 0).sum() / len(df) * 100.0
@@ -497,6 +451,34 @@ def load_data():
     print(f"  Features: {len(FEATURES)}")
     print(f"  PM2.5 range: {df[TARGET].min():.2f} – {df[TARGET].max():.2f} µg/m³")
     print(f"  Sensors: {df['sensor_id'].nunique()}")
+
+    # ── Geographic membership (in / out of Texas) ──
+    # Out-of-TX sensors (NM/OK/AR/LA, inside the pull's buffer box) STAY in the
+    # dataset because TX edge tracts legitimately use them as same-day NEIGHBORS
+    # (the live PurpleAir bbox also extends past the border). But they must NOT be
+    # training/eval TARGETS for a Texas PM2.5 model. We tag membership here;
+    # __main__ trains the deployed model on in_tx rows only and loso_cv folds over
+    # in_tx sensors only, both keeping the full neighbor pool intact.
+    df["in_tx"] = True  # default keep (conservative for sensors absent from the audit)
+    membership_path = os.path.join(PIPELINE_DIR, "sensor_tx_membership.csv")
+    if os.path.exists(membership_path):
+        try:
+            mem = pd.read_csv(membership_path)
+
+            def _canon(s):
+                return pd.to_numeric(s, errors="coerce").astype("Int64").astype(str)
+
+            out_ids = set(_canon(mem.loc[~mem["in_tx"].astype(bool), "sensor_id"]).tolist())
+            df["in_tx"] = ~_canon(df["sensor_id"]).isin(out_ids)
+            n_tx = df.loc[df["in_tx"], "sensor_id"].nunique()
+            n_out = df.loc[~df["in_tx"], "sensor_id"].nunique()
+            print(f"  TX membership: {n_tx} in-Texas sensors (training targets), "
+                  f"{n_out} out-of-Texas sensors kept as neighbors only "
+                  f"({int((~df['in_tx']).sum()):,} rows excluded from targets)")
+        except Exception as e:
+            print(f"  [warn] sensor_tx_membership.csv unreadable ({e}); keeping all sensors as targets")
+    else:
+        print("  [warn] sensor_tx_membership.csv not found; keeping all sensors as targets")
 
     return df
 
@@ -647,9 +629,18 @@ def loso_cv(df):
     print("LEAVE-ONE-SITE-OUT CROSS-VALIDATION")
     print("=" * 70)
 
-    sites = df["sensor_id"].unique()
+    # Fold over IN-TEXAS sensors only (the prediction-target population). Out-of-
+    # TX sensors stay in the neighbor pool but are never held out / evaluated.
+    # NOTE: each fold now RECOMPUTES the training rows' neighbor features with the
+    # held-out sensor removed from the pool (the leakage fix), so a full run is
+    # meaningfully slower than the old leaky version — it is checkpointed every 20
+    # folds and fully resumable.
+    if "in_tx" in df.columns:
+        sites = df.loc[df["in_tx"], "sensor_id"].unique()
+    else:
+        sites = df["sensor_id"].unique()
     n_sites = len(sites)
-    print(f"  Sites: {n_sites}")
+    print(f"  Sites (in-Texas targets): {n_sites}")
 
     # Per-model out-of-fold prediction columns (µg/m³). Storing these SEPARATELY
     # (not just the blended `all_preds`) lets us re-derive the ensemble weights
@@ -657,7 +648,10 @@ def loso_cv(df):
     # re-running the 4.5h fold loop. This is the key v5 change.
     model_names = ["rf", "lgbm", "xgb", "cat"] if HAS_CATBOOST else ["rf", "lgbm", "xgb"]
 
-    checkpoint_path = os.path.join(MODELS_DIR, "loso_checkpoint.joblib")
+    # v2 checkpoint key: the LOSO methodology changed (per-fold leave-one-site-out
+    # neighbor recompute + TX-only targets), so any pre-existing checkpoint from
+    # the old leaky run is intentionally NOT reused.
+    checkpoint_path = os.path.join(MODELS_DIR, "loso_checkpoint_v2.joblib")
 
     # ── Resume from checkpoint if it exists ────────────────────────────────
     if os.path.exists(checkpoint_path):
@@ -687,11 +681,31 @@ def loso_cv(df):
         if site_key in completed_sites:
             continue
 
-        mask = df["sensor_id"] == site
-        train_df = df[~mask]
-        test_df = df[mask]
+        test_mask = (df["sensor_id"] == site).values
+        # Neighbor POOL = every sensor EXCEPT the held-out one (still includes the
+        # out-of-TX sensors, matching what live PurpleAir offers at inference).
+        pool_df = df.loc[~test_mask]
+        # Training TARGETS = in-Texas sensors except the held-out one.
+        if "in_tx" in df.columns:
+            train_mask = (~test_mask) & df["in_tx"].values
+        else:
+            train_mask = ~test_mask
+        train_df = df.loc[train_mask]
+        test_df = df.loc[test_mask]
 
-        X_train = train_df[FEATURES].values
+        # ── LOSO-honest neighbor features ──
+        # Recompute the same-day neighbor features for the TRAINING rows with the
+        # held-out sensor REMOVED from the pool. This is the leakage fix: a
+        # training sensor near the held-out site previously carried a neighbor
+        # mean that had averaged in the held-out site's own same-day target. The
+        # held-out site's OWN rows already exclude themselves from their
+        # neighbors, so the full-pool features already in df are leave-one-out
+        # -honest for the TEST rows and need no recompute.
+        _nbr_tr = compute_neighbor_features_df(train_df, pool_df, target_col=TARGET)
+        X_train_df = train_df[FEATURES].copy()
+        for _c, _a in _nbr_tr.items():
+            X_train_df[_c] = _a
+        X_train = X_train_df.values
         y_train_orig = train_df[TARGET].values
         X_test = test_df[FEATURES].values
         y_test_orig = test_df[TARGET].values
@@ -716,12 +730,12 @@ def loso_cv(df):
         # model so weights can be re-optimized offline. Compute once, reuse.
         per_pred = {n: _to_orig_scale(models[n].predict(X_test)) for n in models}
         for n in models:
-            oof[n][mask.values] = per_pred[n]
+            oof[n][test_mask] = per_pred[n]
 
         pred_fit = sum(weights[n] * models[n].predict(X_test) for n in models)
         pred = _to_orig_scale(pred_fit)
 
-        all_preds[mask.values] = pred
+        all_preds[test_mask] = pred
 
         rmse = np.sqrt(mean_squared_error(y_test_orig, pred))
         mae = mean_absolute_error(y_test_orig, pred)
@@ -795,9 +809,11 @@ def loso_cv(df):
         print(f"  [warn] could not save loso_oof.npz: {e}")
 
     # Compute per-GEOID mean absolute residual for quantum solver
-    df_res = df.copy()
-    df_res["loso_residual"] = np.abs(df[TARGET].values - all_preds)
-    df_res["loso_residual"] = df_res["loso_residual"].fillna(0.0)
+    # Per-GEOID mean abs residual for the quantum solver — over PREDICTED rows
+    # only. Out-of-TX sensors are never folded, so their all_preds stay NaN and
+    # must not dilute the residual map.
+    df_res = df.loc[valid].copy()
+    df_res["loso_residual"] = np.abs(df.loc[valid, TARGET].values - all_preds[valid])
 
     geoid_residuals = df_res.groupby("GEOID")["loso_residual"].mean()
 
@@ -1017,8 +1033,17 @@ if __name__ == "__main__":
     sensor_recent.to_json(export_path, orient="records", indent=2)
     print(f"  saved {len(sensor_recent)} sensors (climatological means) → {export_path}")
 
-    X = df[FEATURES].values
-    y_orig = df[TARGET].values  # always in µg/m³
+    # Deployed model trains on IN-TEXAS sensors only. Out-of-TX sensors stay in
+    # the dataset (they built the neighbor features above and were exported into
+    # the climatology fallback for cross-border edge tracts) but are NOT training
+    # targets for a Texas PM2.5 model.
+    df_tx = df[df["in_tx"]].reset_index(drop=True) if "in_tx" in df.columns else df
+    _n_excl = df["sensor_id"].nunique() - df_tx["sensor_id"].nunique()
+    print(f"\n[targets] Training on {df_tx['sensor_id'].nunique()} in-Texas sensors "
+          f"({len(df_tx):,} rows); excluded {_n_excl} out-of-TX sensors as targets "
+          f"(kept as neighbors).")
+    X = df_tx[FEATURES].values
+    y_orig = df_tx[TARGET].values  # always in µg/m³
     y_fit = _fit_target(y_orig)  # what the trees actually fit on
 
     print(f"\n[target] LOG_TRANSFORM_TARGET = {LOG_TRANSFORM_TARGET}")
@@ -1110,7 +1135,7 @@ if __name__ == "__main__":
             "mae": round(loso["mae"], 4),
             "r2": round(loso["r2"], 4),
             "n_sites": len(loso["site_metrics"]),
-            "note": "pooled out-of-fold R² with inverse-MSE blend (v4 baseline)",
+            "note": "SUPERSEDED inverse-MSE baseline (NOT the deployed blend). The deployed model uses the simplex-convex weights in loso_cv_optimized; read loso_cv_optimized.r2 for the headline LOSO number.",
         },
         # HEADLINE optimized number: simplex-convex weights, grouped-CV honest.
         "loso_cv_optimized": {

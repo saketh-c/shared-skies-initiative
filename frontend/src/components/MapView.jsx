@@ -139,9 +139,11 @@ const MapViewContent = forwardRef(
     const [tooltipData, setTooltipData] = useState(null);
     const [legendExpanded, setLegendExpanded] = useState(false);
 
-    // NOAA HMS smoke polygon layer state. Hidden by default; toggle via legend.
+    // NOAA HMS smoke polygons still feed the model server-side; the optional
+    // map overlay is kept but no longer surfaced in the legend (removed by
+    // request), so it stays hidden. setter intentionally omitted.
     const [hmsData, setHmsData] = useState(null);
-    const [showHmsSmoke, setShowHmsSmoke] = useState(false);
+    const [showHmsSmoke] = useState(false);
 
     // Fetch the HMS smoke layer once on mount and refresh every hour. Survives
     // when toggled off because the cached feature collection is cheap to keep.
@@ -588,40 +590,6 @@ const MapViewContent = forwardRef(
                 <span className="legend-range">{b.label}</span>
               </div>
             ))}
-
-            {/* NOAA HMS smoke polygon layer toggle + density legend */}
-            <div className="legend-divider" />
-            <label className="legend-row legend-toggle" style={{ cursor: hmsData?.features?.length ? "pointer" : "not-allowed", opacity: hmsData?.features?.length ? 1 : 0.55 }}>
-              <input
-                type="checkbox"
-                checked={showHmsSmoke}
-                disabled={!hmsData?.features?.length}
-                onChange={(e) => setShowHmsSmoke(e.target.checked)}
-                style={{ marginRight: 8 }}
-              />
-              <span className="legend-category">
-                {lang === "es" ? "Humo (NOAA HMS)" : "Smoke (NOAA HMS)"}
-              </span>
-              <span className="legend-range">
-                {hmsData?.count ? `${hmsData.count} ${hmsData.count === 1 ? "plume" : "plumes"}` : (lang === "es" ? "ninguno" : "none")}
-              </span>
-            </label>
-            {showHmsSmoke && hmsData?.features?.length > 0 && (
-              <>
-                {["Light", "Medium", "Heavy"].map((d) => (
-                  <div className="legend-row legend-sub" key={`hms-${d}`}>
-                    <div className="legend-swatch" style={{ background: HMS_STYLE[d].fillColor, opacity: HMS_STYLE[d].fillOpacity + 0.2 }} />
-                    <span className="legend-category">{d}</span>
-                    <span className="legend-range">{hmsData?.density_counts?.[d] || 0}</span>
-                  </div>
-                ))}
-                <div className="legend-row legend-source">
-                  <span className="legend-range" style={{ fontSize: "0.72em", opacity: 0.75 }}>
-                    {hmsData?.data_date && `${lang === "es" ? "Fecha" : "Date"}: ${hmsData.data_date}`}
-                  </span>
-                </div>
-              </>
-            )}
           </div>
         </MapContainer>
 

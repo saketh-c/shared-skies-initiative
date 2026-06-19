@@ -24,26 +24,26 @@ const TRANSLATIONS = {
       levels: {
         good: {
           name: "Good",
-          range: "0 – 6 µg/m³",
-          description: "Clean air at or near the WHO annual guideline (5 µg/m³). No health concerns for anyone — ideal for outdoor activities.",
+          range: "0 – 9 µg/m³",
+          description: "Within the U.S. EPA annual PM2.5 standard (9 µg/m³). No health concerns for anyone — ideal for outdoor activities.",
           who: "Safe for everyone",
         },
         moderate: {
           name: "Moderate",
-          range: "6 – 9 µg/m³",
-          description: "Above the WHO annual guideline but within the U.S. EPA annual standard (9 µg/m³). Most people experience no effects; a few unusually sensitive individuals may notice minor symptoms.",
+          range: "9 – 13 µg/m³",
+          description: "Just above the U.S. EPA annual standard (9 µg/m³). Most people experience no effects; a few unusually sensitive individuals may notice minor symptoms.",
           who: "Unusually sensitive people: consider reducing prolonged outdoor exertion",
         },
         elevated: {
           name: "Elevated",
-          range: "9 – 15 µg/m³",
-          description: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Long-term exposure at these levels is linked to cardiovascular and respiratory risk. Common in dense urban and industrial areas.",
+          range: "13 – 17 µg/m³",
+          description: "Above the WHO 24-hour guideline (15 µg/m³). Prolonged exposure carries cardiovascular and respiratory risk; common in dense urban/industrial areas and during smoke or dust events.",
           who: "Sensitive groups (asthma, heart disease, elderly, children): limit prolonged outdoor exertion.",
         },
         high: {
           name: "High",
-          range: "15+ µg/m³",
-          description: "Above the WHO 24-hour guideline (15 µg/m³). Everyone may begin to experience effects; sensitive groups are at greater risk. Often driven by wildfire smoke or dust events.",
+          range: "17+ µg/m³",
+          description: "Everyone may begin to experience effects; sensitive groups (asthma, heart disease, elderly, children) are at greater risk. Usually driven by wildfire smoke or dust.",
           who: "Everyone: limit prolonged or heavy outdoor activity. Sensitive groups: stay indoors when possible.",
         },
       },
@@ -147,26 +147,26 @@ const TRANSLATIONS = {
       levels: {
         good: {
           name: "Bueno",
-          range: "0 – 6 µg/m³",
-          description: "Aire limpio, igual o cercano a la guía anual de la OMS (5 µg/m³). Sin preocupaciones de salud para nadie — ideal para actividades al aire libre.",
+          range: "0 – 9 µg/m³",
+          description: "Dentro del estándar anual de PM2.5 de la EPA de EE. UU. (9 µg/m³). Sin preocupaciones de salud para nadie — ideal para actividades al aire libre.",
           who: "Seguro para todos",
         },
         moderate: {
           name: "Moderado",
-          range: "6 – 9 µg/m³",
-          description: "Por encima de la guía anual de la OMS pero dentro del estándar anual de la EPA de EE. UU. (9 µg/m³). La mayoría no experimenta efectos; algunos individuos inusualmente sensibles pueden notar síntomas menores.",
+          range: "9 – 13 µg/m³",
+          description: "Apenas por encima del estándar anual de la EPA de EE. UU. (9 µg/m³). La mayoría no experimenta efectos; algunos individuos inusualmente sensibles pueden notar síntomas menores.",
           who: "Personas sensibles: considere reducir el esfuerzo prolongado al aire libre",
         },
         elevated: {
           name: "Elevado",
-          range: "9 – 15 µg/m³",
-          description: "Por encima del estándar anual de PM2.5 de la EPA (9 µg/m³). La exposición prolongada a estos niveles se asocia con riesgo cardiovascular y respiratorio. Común en zonas urbanas densas e industriales.",
+          range: "13 – 17 µg/m³",
+          description: "Por encima de la guía de 24 horas de la OMS (15 µg/m³). La exposición prolongada conlleva riesgo cardiovascular y respiratorio; común en zonas urbanas/industriales densas y durante eventos de humo o polvo.",
           who: "Grupos sensibles (asma, enfermedades cardíacas, ancianos, niños): limitar el esfuerzo prolongado al aire libre.",
         },
         high: {
           name: "Alto",
-          range: "15+ µg/m³",
-          description: "Por encima de la guía de 24 horas de la OMS (15 µg/m³). Todos pueden comenzar a experimentar efectos; los grupos sensibles tienen mayor riesgo. A menudo causado por humo de incendios o eventos de polvo.",
+          range: "17+ µg/m³",
+          description: "Todos pueden comenzar a experimentar efectos; los grupos sensibles (asma, enfermedades cardíacas, ancianos, niños) tienen mayor riesgo. Generalmente por humo de incendios o polvo.",
           who: "Todos: limitar la actividad al aire libre prolongada o intensa. Grupos sensibles: permanecer en interiores cuando sea posible.",
         },
       },
@@ -264,16 +264,16 @@ const CATEGORY_MAP = {
 
 const HEALTH_MSG = {
   en: {
-    Good: "Air quality is good (at or near the WHO annual guideline of 5 µg/m³).",
-    Moderate: "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³).",
-    Elevated: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care.",
-    High: "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure.",
+    Good: "Air quality is good — within the U.S. EPA annual PM2.5 standard (9 µg/m³).",
+    Moderate: "Moderate — above the EPA annual standard. Unusually sensitive people may want to limit prolonged outdoor exertion.",
+    Elevated: "Elevated — above the WHO 24-hour guideline (15 µg/m³). Sensitive groups should limit prolonged outdoor activity.",
+    High: "⚠️ High — everyone may begin to feel effects; sensitive groups are at greater risk. Often driven by wildfire smoke or dust.",
   },
   es: {
-    Good: "La calidad del aire es buena (igual o cercana a la guía anual de la OMS de 5 µg/m³).",
-    Moderate: "Por encima de la guía anual de la OMS; dentro del estándar anual de la EPA de EE. UU. (9 µg/m³).",
-    Elevated: "Por encima del estándar anual de PM2.5 de la EPA (9 µg/m³). Los grupos sensibles deben tener cuidado.",
-    High: "⚠️ Por encima de la guía de 24 horas de la OMS (15 µg/m³). Todos deberían limitar la exposición prolongada al aire libre.",
+    Good: "La calidad del aire es buena — dentro del estándar anual de PM2.5 de la EPA de EE. UU. (9 µg/m³).",
+    Moderate: "Moderado — por encima del estándar anual de la EPA. Las personas inusualmente sensibles podrían limitar el esfuerzo prolongado al aire libre.",
+    Elevated: "Elevado — por encima de la guía de 24 horas de la OMS (15 µg/m³). Los grupos sensibles deben limitar la actividad prolongada al aire libre.",
+    High: "⚠️ Alto — todos pueden empezar a sentir efectos; los grupos sensibles tienen mayor riesgo. A menudo por humo de incendios o polvo.",
   }
 };
 

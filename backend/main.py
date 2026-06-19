@@ -880,8 +880,15 @@ def hex_to_rgb(hex_color):
 
 
 def rgb_to_hex(rgb):
-    """Convert RGB tuple to hex color."""
-    return '#{:02x}{:02x}{:02x}'.format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+    """Convert RGB tuple to hex color. Uses round-half-up (int(c+0.5)) — matching
+    JS Math.round for non-negative values — so the backend's per-tract `color`
+    is BYTE-IDENTICAL to the frontend legend's pm25Color (avoids Python's
+    banker's rounding diverging by 1 LSB at exact .5 midpoints)."""
+    return '#{:02x}{:02x}{:02x}'.format(
+        max(0, min(255, int(rgb[0] + 0.5))),
+        max(0, min(255, int(rgb[1] + 0.5))),
+        max(0, min(255, int(rgb[2] + 0.5))),
+    )
 
 
 def interpolate_color(color1, color2, factor):
@@ -897,33 +904,33 @@ def interpolate_color(color1, color2, factor):
 def pm25_color_gradient(pm25: float) -> str:
     """Get gradient color based on PM2.5 value.
 
-    Breakpoints are anchored to published annual/24-hr health standards so the
-    map is paper-defensible: 5 = WHO annual guideline, 9 = U.S. EPA annual NAAQS
-    (2024), 15 = WHO 24-hr guideline. Urban areas (~9-11 µg/m³) land in the
-    orange 'above-EPA-standard' band; clean rural air stays green/yellow.
+    Bands: Good 0-9 (green), Moderate 9-13 (yellow), Elevated 13-17 (orange),
+    High 17+ (red→dark red). Each band darkens toward its upper boundary, and
+    the High band keeps darkening with concentration so wildfire-smoke days read
+    dramatically dark. 9 = U.S. EPA annual NAAQS (2024).
     """
     if pm25 < 0:
         pm25 = 0
 
-    # Green: 0.0-6.0  (clean — at/near the WHO annual guideline of 5)
-    if pm25 <= 6.0:
-        factor = pm25 / 6.0
+    # Green: 0.0-9.0  (within the EPA annual standard)
+    if pm25 <= 9.0:
+        factor = pm25 / 9.0
         return interpolate_color("#90EE90", "#00b894", factor)
 
-    # Yellow: 6.0-9.0  (above the WHO annual guideline, within EPA annual std)
-    elif pm25 <= 9.0:
-        factor = (pm25 - 6.0) / 3.0
+    # Yellow: 9.0-13.0
+    elif pm25 <= 13.0:
+        factor = (pm25 - 9.0) / 4.0
         return interpolate_color("#FFFF99", "#FFD700", factor)
 
-    # Orange: 9.0-15.0  (above EPA annual NAAQS of 9.0)
-    elif pm25 <= 15.0:
-        factor = (pm25 - 9.0) / 6.0
+    # Orange: 13.0-17.0
+    elif pm25 <= 17.0:
+        factor = (pm25 - 13.0) / 4.0
         return interpolate_color("#FFB347", "#E8590C", factor)
 
-    # Red → dark red: 15.0+  (above WHO 24-hr guideline; darkens through the EPA
-    # 24-hr Unhealthy threshold so wildfire-smoke days read dramatically).
+    # Red → dark red: 17.0+  (darkens with concentration; saturates ~55, the EPA
+    # 24-hr Unhealthy threshold, so smoke/dust days read dramatically dark).
     else:
-        factor = min(1.0, (pm25 - 15.0) / 40.0)
+        factor = min(1.0, (pm25 - 17.0) / 38.0)
         return interpolate_color("#FF6B6B", "#800000", factor)
 
 
@@ -951,36 +958,37 @@ def pm25_to_epa_aqi(pm25: float) -> int:
 
 
 def pm25_info(pm25: float) -> dict:
-    """Get category info on a standards-anchored scale (WHO 5 / EPA 9 / WHO 15)."""
+    """Get category info. Bands: Good 0-9 / Moderate 9-13 / Elevated 13-17 /
+    High 17+. 9 µg/m³ = U.S. EPA annual NAAQS; 15 µg/m³ = WHO 24-hr guideline."""
     color = pm25_color_gradient(pm25)
 
-    if pm25 <= 6.0:
+    if pm25 <= 9.0:
         return {
             "category": "Good",
             "color": color,
-            "aqi_range": "0–6",
-            "health_msg": "Air quality is good (at or near the WHO annual guideline of 5 µg/m³).",
+            "aqi_range": "0–9",
+            "health_msg": "Air quality is good — within the U.S. EPA annual PM2.5 standard (9 µg/m³).",
         }
-    elif pm25 <= 9.0:
+    elif pm25 <= 13.0:
         return {
             "category": "Moderate",
             "color": color,
-            "aqi_range": "6–9",
-            "health_msg": "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³).",
+            "aqi_range": "9–13",
+            "health_msg": "Moderate — above the EPA annual standard. Unusually sensitive people may want to limit prolonged outdoor exertion.",
         }
-    elif pm25 <= 15.0:
+    elif pm25 <= 17.0:
         return {
             "category": "Elevated",
             "color": color,
-            "aqi_range": "9–15",
-            "health_msg": "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care.",
+            "aqi_range": "13–17",
+            "health_msg": "Elevated — above the WHO 24-hour guideline (15 µg/m³). Sensitive groups should limit prolonged outdoor activity.",
         }
     else:
         return {
             "category": "High",
             "color": color,
-            "aqi_range": "15+",
-            "health_msg": "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure.",
+            "aqi_range": "17+",
+            "health_msg": "⚠️ High — everyone may begin to feel effects; sensitive groups are at greater risk. Often driven by wildfire smoke or dust.",
         }
 
 
@@ -1565,6 +1573,9 @@ async def get_tract(geoid: str):
     cached = (state.get("cache_texas_by_geoid") or {}).get(geoid)
     if cached is not None:
         pm25 = float(cached["pm25"])
+    elif state.get("bundle") is None:
+        # Cold-start before the model finished loading — don't NoneType-crash.
+        raise HTTPException(503, "Model still loading. Please retry in a moment.")
     else:
         # Cold-start only (no texas batch yet): model-unit fallback weather.
         temporal = get_temporal(tz)
@@ -1669,7 +1680,9 @@ def _compute_model_disagreement(df: pd.DataFrame, weather: dict, temporal: dict)
     change when weather varies? Tracts that are highly sensitive to weather
     inputs are harder to predict accurately without a local sensor.
     """
-    bundle = state["bundle"]
+    bundle = state.get("bundle")
+    if bundle is None:
+        raise ValueError("Model bundle not loaded")
     features = bundle["feature_names"]
     weights = bundle["weights"]
     models_dict = bundle["models"]

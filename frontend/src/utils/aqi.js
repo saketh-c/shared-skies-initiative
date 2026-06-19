@@ -1,16 +1,12 @@
 /**
- * PM2.5 → category utilities with a STANDARDS-ANCHORED gradient color scale.
+ * PM2.5 → category utilities with a gradient color scale.
  *
- * Breakpoints map to published health standards so the map is paper-defensible:
- *   5  = WHO annual guideline
- *   9  = U.S. EPA annual NAAQS (2024)
- *   15 = WHO 24-hour guideline
- *
- * Scale:
- * 0.0-6.0:  Green  (clean, at/near WHO annual of 5)  "Good"
- * 6.0-9.0:  Yellow (above WHO annual, within EPA 9)   "Moderate"
- * 9.0-15.0: Orange (above EPA annual standard)      "Elevated"
- * 15.0+:    Red → dark red (above WHO 24-hr)        "High"
+ * Bands (9 µg/m³ = U.S. EPA annual NAAQS 2024; 15 = WHO 24-hr guideline):
+ * 0.0-9.0:   Green  → darker green       "Good"
+ * 9.0-13.0:  Yellow → gold               "Moderate"
+ * 13.0-17.0: Light orange → burnt orange "Elevated"
+ * 17.0+:     Red → dark red (keeps darkening with concentration) "High"
+ * Each band darkens toward its upper boundary.
  * MUST stay in sync with backend/main.py pm25_color_gradient/pm25_info.
  */
 
@@ -18,35 +14,35 @@
 const COLOR_SCALE = {
   goodRange: {
     min: 0.0,
-    max: 6.0,
+    max: 9.0,
     colorMin: "#90EE90",  // Light green
     colorMax: "#00b894",  // Darker green
     category: "Good",
-    label: "0–6 µg/m³"
+    label: "0–9 µg/m³"
   },
   moderateRange: {
-    min: 6.0,
-    max: 9.0,
+    min: 9.0,
+    max: 13.0,
     colorMin: "#FFFF99",  // Light yellow
     colorMax: "#FFD700",  // Darker yellow/gold
     category: "Moderate",
-    label: "6–9 µg/m³"
+    label: "9–13 µg/m³"
   },
   elevatedRange: {
-    min: 9.0,
-    max: 15.0,
+    min: 13.0,
+    max: 17.0,
     colorMin: "#FFB347",  // Light orange
     colorMax: "#E8590C",  // Burnt orange
     category: "Elevated",
-    label: "9–15 µg/m³"
+    label: "13–17 µg/m³"
   },
   highRange: {
-    min: 15.0,
+    min: 17.0,
     max: Infinity,
     colorMin: "#FF6B6B",   // Red
     colorMax: "#800000",   // Dark red (darkens as pollution rises; saturates ~55)
     category: "High",
-    label: "15+ µg/m³"
+    label: "17+ µg/m³"
   }
 };
 
@@ -118,7 +114,7 @@ export function pm25Color(pm25) {
   }
 
   if (pm25 <= COLOR_SCALE.elevatedRange.max) {
-    // Interpolate within orange range (9–15, above EPA annual standard)
+    // Interpolate within orange range (13–17)
     const factor = (pm25 - COLOR_SCALE.elevatedRange.min) /
                    (COLOR_SCALE.elevatedRange.max - COLOR_SCALE.elevatedRange.min);
     return interpolateColor(
@@ -128,9 +124,9 @@ export function pm25Color(pm25) {
     );
   }
 
-  // High (15+) - red that darkens as pollution rises (saturates ~55, so
-  // wildfire-smoke days read dramatically dark).
-  const highFactor = Math.min(1.0, (pm25 - 15.0) / 40.0);
+  // High (17+) - red that keeps darkening with concentration (saturates ~55,
+  // so wildfire-smoke/dust days read dramatically dark).
+  const highFactor = Math.min(1.0, (pm25 - 17.0) / 38.0);
   return interpolateColor(
     COLOR_SCALE.highRange.colorMin,
     COLOR_SCALE.highRange.colorMax,
@@ -149,7 +145,7 @@ export function getAQIInfo(pm25) {
       bg: "rgba(144, 238, 144, 0.12)",
       label: COLOR_SCALE.goodRange.label,
       aqi_range: "Good",
-      health_msg: "Air quality is good (at or near the WHO annual guideline of 5 µg/m³)."
+      health_msg: "Air quality is good — within the U.S. EPA annual PM2.5 standard (9 µg/m³)."
     };
   }
 
@@ -160,7 +156,7 @@ export function getAQIInfo(pm25) {
       bg: "rgba(255, 255, 153, 0.12)",
       label: COLOR_SCALE.moderateRange.label,
       aqi_range: "Moderate",
-      health_msg: "Above the WHO annual guideline; within the U.S. EPA annual standard (9 µg/m³)."
+      health_msg: "Moderate — above the EPA annual standard. Unusually sensitive people may want to limit prolonged outdoor exertion."
     };
   }
 
@@ -171,18 +167,18 @@ export function getAQIInfo(pm25) {
       bg: "rgba(232, 89, 12, 0.12)",
       label: COLOR_SCALE.elevatedRange.label,
       aqi_range: "Elevated",
-      health_msg: "Above the U.S. EPA annual PM2.5 standard (9 µg/m³). Sensitive groups should take care."
+      health_msg: "Elevated — above the WHO 24-hour guideline (15 µg/m³). Sensitive groups should limit prolonged outdoor activity."
     };
   }
 
-  // High (above WHO 24-hr guideline)
+  // High
   return {
     category: COLOR_SCALE.highRange.category,
     color: pm25Color(pm25),
     bg: "rgba(128, 0, 0, 0.12)",
     label: COLOR_SCALE.highRange.label,
     aqi_range: "High",
-    health_msg: "⚠️ Above the WHO 24-hour guideline (15 µg/m³). Everyone should limit prolonged outdoor exposure."
+    health_msg: "⚠️ High — everyone may begin to feel effects; sensitive groups are at greater risk. Often driven by wildfire smoke or dust."
   };
 }
 
@@ -241,8 +237,8 @@ export function pm25ToEpaAqi(pm25) {
  * hardcoded #b30000 that the gradient never actually produces at any value.)
  */
 export const BREAKPOINTS = [
-  { max: 6.0,      category: "Good",     color: pm25Color(6),  label: "0–6" },
-  { max: 9.0,      category: "Moderate", color: pm25Color(9),  label: "6–9" },
-  { max: 15.0,     category: "Elevated", color: pm25Color(15), label: "9–15" },
-  { max: Infinity, category: "High",     color: pm25Color(35), label: "15+" },
+  { max: 9.0,      category: "Good",     color: pm25Color(9),  label: "0–9" },
+  { max: 13.0,     category: "Moderate", color: pm25Color(13), label: "9–13" },
+  { max: 17.0,     category: "Elevated", color: pm25Color(17), label: "13–17" },
+  { max: Infinity, category: "High",     color: pm25Color(35), label: "17+" },
 ];

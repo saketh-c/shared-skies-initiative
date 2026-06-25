@@ -524,6 +524,7 @@ def train_ensemble(X_train, y_train, verbose=True):
     if verbose:
         print("Training LightGBM (up to 2000 rounds, early stopping)...")
     models["lgbm"] = lgb.LGBMRegressor(
+        objective="huber",
         n_estimators=2000,
         learning_rate=0.02,
         num_leaves=48,
@@ -546,6 +547,7 @@ def train_ensemble(X_train, y_train, verbose=True):
     if verbose:
         print("Training XGBoost (up to 2000 rounds, hist tree method, early stopping)...")
     models["xgb"] = xgb.XGBRegressor(
+        objective="reg:pseudohubererror",
         n_estimators=2000,
         learning_rate=0.02,
         max_depth=5,
@@ -1038,6 +1040,7 @@ if __name__ == "__main__":
     # the climatology fallback for cross-border edge tracts) but are NOT training
     # targets for a Texas PM2.5 model.
     df_tx = df[df["in_tx"]].reset_index(drop=True) if "in_tx" in df.columns else df
+    df_tx = df_tx.sort_values("date").reset_index(drop=True)
     _n_excl = df["sensor_id"].nunique() - df_tx["sensor_id"].nunique()
     print(f"\n[targets] Training on {df_tx['sensor_id'].nunique()} in-Texas sensors "
           f"({len(df_tx):,} rows); excluded {_n_excl} out-of-TX sensors as targets "

@@ -19,7 +19,6 @@ export default function SidebarHeader({ selectedTract, visitCount, onDeselect, s
 
   function toggleLang(newLang) {
     setLang(newLang);
-    try { localStorage.setItem("ssi_lang", newLang); } catch (e) {}
   }
 
   return (

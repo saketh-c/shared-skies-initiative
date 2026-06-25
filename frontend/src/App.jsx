@@ -8,10 +8,13 @@ import { findNearestTract } from "./utils/geo.js";
 const SensorPlacement = lazy(() => import("./components/SensorPlacement.jsx"));
 const AirQualityGuide = lazy(() => import("./components/AirQualityGuide.jsx"));
 
+const preloadSensorPlacement = () => import("./components/SensorPlacement.jsx");
+const preloadAirQualityGuide = () => import("./components/AirQualityGuide.jsx");
+
 // API base URL: in production set VITE_API_URL=https://your-backend.onrender.com
 // In dev, leave empty so /api/... uses the Vite proxy to localhost:8000
 const API_BASE = import.meta.env.VITE_API_URL || "";
-const REFRESH_MS = 30 * 60 * 1000; // 30 min
+const REFRESH_MS = 15 * 60 * 1000; // 15 min (aligned with backend PURPLEAIR_CACHE_TTL_MIN)
 
 export const LanguageContext = createContext({ lang: "en", setLang: () => {} });
 
@@ -57,6 +60,10 @@ export default function App() {
   });
   const langCtx = useMemo(() => ({ lang, setLang }), [lang]);
 
+  useEffect(() => {
+    try { localStorage.setItem("ssi_lang", lang); } catch (e) {}
+  }, [lang]);
+
   const fetchPredictions = useCallback(async () => {
     try {
       setLoading(true);
@@ -98,19 +105,20 @@ export default function App() {
 
   // Record a page visit
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/visit`, { method: "POST" });
+        const res = await fetch(`${API_BASE}/api/visit`, { method: "POST", signal: controller.signal });
         if (!cancelled && res.ok) {
           const data = await res.json();
           setVisitCount(data.visits);
         }
       } catch (e) {
-        console.warn("Failed to record visit:", e.message);
+        if (e.name !== 'AbortError') console.warn("Failed to record visit:", e.message);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, []);
 
   const handleTractSelect = useCallback(async (geoid) => {
@@ -160,7 +168,13 @@ export default function App() {
   }, []);
 
   const handleTabChange = useCallback((tab) => {
-    setActiveTab(tab);
+    if (!document.startViewTransition) {
+      setActiveTab(tab);
+    } else {
+      document.startViewTransition(() => {
+        setActiveTab(tab);
+      });
+    }
     if (tab === "quantum" && !quantumData && !quantumLoading) fetchQuantumData();
   }, [quantumData, quantumLoading, fetchQuantumData]);
 
@@ -202,6 +216,7 @@ export default function App() {
               aria-selected={activeTab === "quantum"}
               className={`sidebar-tab${activeTab === "quantum" ? " active" : ""}`}
               onClick={() => handleTabChange("quantum")}
+              onMouseEnter={preloadSensorPlacement}
             >
               {lang === "es" ? "Sensores" : "Sensors"}
             </button>
@@ -210,6 +225,7 @@ export default function App() {
               aria-selected={activeTab === "guide"}
               className={`sidebar-tab${activeTab === "guide" ? " active" : ""}`}
               onClick={() => handleTabChange("guide")}
+              onMouseEnter={preloadAirQualityGuide}
             >
               {lang === "es" ? "Guía" : "Guide"}
             </button>

@@ -264,6 +264,7 @@ button { font-family: inherit; }
   background: var(--success);
   box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
   animation: livePulse 2s var(--ease) infinite;
+  will-change: transform, opacity;
 }
 @keyframes livePulse {
   0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
@@ -539,6 +540,7 @@ button { font-family: inherit; }
   border-radius: 50%;
   background: currentColor;
   animation: livePulse 1.4s var(--ease) infinite;
+  will-change: transform, opacity;
 }
 
 /* ── EJ section ──────────────────────────────────────────────────────────── */
@@ -1006,8 +1008,13 @@ button { font-family: inherit; }
   filter: drop-shadow(0 0 8px rgba(251, 191, 36, 0.85));
   transform-origin: center;
   transform-box: fill-box;
-  animation: sensorPulse 2.4s var(--ease) infinite;
+  animation: sensorPulse 2s var(--ease) infinite;
+  will-change: transform, opacity;
 }
+
+/* Distinct from livePulse (the box-shadow ripple on the live-dot): this is an
+   opacity pulse for the SVG sensor marker. They MUST NOT share a name — a
+   duplicate @keyframes livePulse here would override the ripple globally. */
 @keyframes sensorPulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.78; }

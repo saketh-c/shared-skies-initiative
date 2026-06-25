@@ -3,6 +3,8 @@ import "./SearchBar.css";
 import { LanguageContext } from "../App";
 import { t } from "../i18n";
 
+const API_BASE = import.meta.env.VITE_API_URL || "";
+
 const PinIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
@@ -43,6 +45,8 @@ export default function SearchBar({ onSearch, loading }) {
   const searchRef = useRef(null);
   const timeoutRef = useRef(null);
 
+  const abortControllerRef = useRef(null);
+
   // Debounced Nominatim suggestions
   useEffect(() => {
     if (searchType !== "address" || !searchInput.trim() || searchInput.length < 3) {
@@ -51,27 +55,32 @@ export default function SearchBar({ onSearch, loading }) {
     }
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(async () => {
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+      abortControllerRef.current = new AbortController();
+
       try {
-        // Geocoding via the public Nominatim endpoint. We send Accept-Language
-        // (a CORS-safelisted header — no preflight) so results match the UI
-        // language. Note: browsers FORBID setting a custom User-Agent, so we
-        // can't add the descriptive UA Nominatim's usage policy requests; the
-        // deployed site's Referer identifies it instead. For high-volume
-        // production use, proxy this through the backend with a proper UA.
         const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchInput + ", Texas")}&limit=5`,
-          { headers: { "Accept-Language": lang === "es" ? "es" : "en" } }
+          `${API_BASE}/api/geocode?q=${encodeURIComponent(searchInput + ", Texas")}`,
+          { 
+            headers: { "Accept-Language": lang === "es" ? "es" : "en" },
+            signal: abortControllerRef.current.signal
+          }
         );
         const results = await response.json();
         setSuggestions(results);
         setShowSuggestions(true);
       } catch (err) {
-        console.error("Autocomplete error:", err);
-        setSuggestions([]);
+        if (err.name !== 'AbortError') {
+          console.error("Autocomplete error:", err);
+          setSuggestions([]);
+        }
       }
     }, 300);
-    return () => clearTimeout(timeoutRef.current);
-  }, [searchInput, searchType]);
+    return () => {
+      clearTimeout(timeoutRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, [searchInput, searchType, lang]);
 
   // Click-outside
   useEffect(() => {

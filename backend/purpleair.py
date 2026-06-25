@@ -33,7 +33,6 @@ CRITICAL correctness notes (these MUST track pipeline/03_train_enhanced.py):
     not sensors, so the plain statewide same-day mean is the closest match.)
 """
 import os
-import time
 from datetime import datetime, timezone
 
 import httpx
@@ -91,10 +90,17 @@ async def fetch_live_sensors() -> list[dict]:
     if not key:
         return []
 
+    # Cost note: PurpleAir bills 1 + (sensors × fields) points per call. We drop
+    # last_seen and location_type from the field list because the location_type=0
+    # and max_age params already filter outdoor + fresh sensors SERVER-SIDE, so
+    # downloading those two fields just to re-check them client-side is wasted
+    # spend. Requesting 5 fields (+ implicit sensor_index = 6 billed) instead of
+    # 7 (+ sensor_index = 8) is a ~25% per-call cost reduction. confidence has no
+    # server-side filter param, so it stays.
     params = {
-        "fields": "latitude,longitude,pm2.5_24hour,pm2.5_atm,last_seen,confidence,location_type",
-        "location_type": 0,        # outdoor only
-        "max_age": MAX_AGE_SEC,    # server-side freshness filter
+        "fields": "latitude,longitude,pm2.5_24hour,pm2.5_atm,confidence",
+        "location_type": 0,        # outdoor only (sole outdoor filter now)
+        "max_age": MAX_AGE_SEC,    # sole freshness filter (last_seen field dropped)
         **TX_BBOX,
     }
     try:
@@ -114,13 +120,12 @@ async def fetch_live_sensors() -> list[dict]:
         return []
 
     idx = {name: i for i, name in enumerate(cols)}
-    needed = ("latitude", "longitude", "pm2.5_atm", "last_seen", "confidence", "location_type")
+    needed = ("latitude", "longitude", "pm2.5_atm", "confidence")
     if not all(n in idx for n in needed):
         print(f"[purpleair] unexpected fields: {cols}")
         return []
     i24 = idx.get("pm2.5_24hour")
 
-    now = int(time.time())
     sensors = []
     for row in rows:
         try:
@@ -128,19 +133,15 @@ async def fetch_live_sensors() -> list[dict]:
             lon = row[idx["longitude"]]
             pm24 = row[i24] if i24 is not None else None
             pm = pm24 if pm24 is not None else row[idx["pm2.5_atm"]]
-            last_seen = row[idx["last_seen"]]
             conf = row[idx["confidence"]]
-            loc = row[idx["location_type"]]
         except (IndexError, KeyError):
             continue
-        # QC: outdoor, fresh, trustworthy, valid PM.
-        if lat is None or lon is None or pm is None or last_seen is None:
-            continue
-        if loc != 0:
+        # QC: trustworthy + valid PM. Outdoor-only and freshness are already
+        # enforced SERVER-SIDE by the location_type=0 and max_age params, so we
+        # no longer download (or bill for) last_seen / location_type to re-check.
+        if lat is None or lon is None or pm is None:
             continue
         if conf is None or conf < MIN_CONFIDENCE:
-            continue
-        if (now - int(last_seen)) > MAX_AGE_SEC:
             continue
         if not (PM25_MIN_VALID <= pm <= PM25_MAX_VALID):
             continue

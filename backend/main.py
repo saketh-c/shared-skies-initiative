@@ -11,6 +11,7 @@ import asyncio
 import json
 import math
 import os
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -46,7 +47,7 @@ MODELS_DIR = os.path.join(ROOT, "models")
 # from same-day live readings to match training. TTL 60 min: with the 24h-mean
 # field a 1-hour cadence tracks events closely while staying cheap (24 small
 # bbox pulls/day). Set PURPLEAIR_API_KEY in Render env to override the key.
-PURPLEAIR_CACHE_TTL_MIN = int(os.environ.get("PURPLEAIR_CACHE_TTL_MIN", "60"))
+PURPLEAIR_CACHE_TTL_MIN = int(os.environ.get("PURPLEAIR_CACHE_TTL_MIN", "15"))
 # Clip dist_to_nearest_sensor to the training-network max so rural tracts (which
 # can be 195km from any sensor vs the 164km training max) don't push the tree
 # models out of distribution.
@@ -135,7 +136,7 @@ _conditions_cache: dict = {"data": None, "expires": datetime.min.replace(tzinfo=
 # conditions GRID (location-varying, never a frozen statewide constant);
 # (2) the cache is size-capped.
 CLICK_WEATHER_TTL_MIN = int(os.environ.get("CLICK_WEATHER_TTL_MIN", "60"))
-_click_weather_cache: dict = {}            # "lat,lon" 0.1° key -> {weather, expires}
+_click_weather_cache = OrderedDict()       # "lat,lon" 0.1° key -> {weather, expires}
 _click_weather_cooldown = {"until": datetime.min.replace(tzinfo=timezone.utc)}
 
 
@@ -637,8 +638,10 @@ async def get_click_weather(lat: float, lon: float) -> dict:
     key = f"{round(float(lat), 1):.1f},{round(float(lon), 1):.1f}"
     now = datetime.now(timezone.utc)
     hit = _click_weather_cache.get(key)
-    if hit and now < hit["expires"]:
-        return hit["weather"]
+    if hit:
+        _click_weather_cache.move_to_end(key)
+        if now < hit["expires"]:
+            return hit["weather"]
     if now < _click_weather_cooldown["until"]:
         return await get_display_weather(lat, lon)  # API recently failed
     try:
@@ -659,9 +662,9 @@ async def get_click_weather(lat: float, lon: float) -> dict:
             "pressure":    round(float(cur.get("pressure_msl") or 1013.0), 1),
             "wind_speed":  round(float(cur.get("wind_speed_10m") or 0), 1),
         }
-        if len(_click_weather_cache) > 600:
-            _click_weather_cache.clear()
         _click_weather_cache[key] = {"weather": weather, "expires": now + timedelta(minutes=CLICK_WEATHER_TTL_MIN)}
+        if len(_click_weather_cache) > 600:
+            _click_weather_cache.popitem(last=False)
         return weather
     except Exception as e:
         # Trip a 30-min cooldown so we don't hammer a quota-exhausted API on
@@ -747,12 +750,14 @@ def _compute_v3_shared(weather: dict, temporal: dict) -> dict:
     shared["dow_cos"] = np.cos(2 * np.pi * dow / 7)
     shared["doy_sin"] = np.sin(2 * np.pi * doy / 365)
     shared["doy_cos"] = np.cos(2 * np.pi * doy / 365)
-    # Interactions
+    # Interactions: ONLY the two the deployed model actually uses (features 36-37
+    # in feature_names.json). Formulas mirror pipeline/03_train_enhanced.py exactly.
+    # run_prediction() (single-tract cold-start path) reads these from `shared`;
+    # without them the model would silently receive 0.0 → train/serve skew. The
+    # three previously-computed extras (wind_x_season / humidity_x_season /
+    # precip_x_temp) were never model features — dead compute — so they stay gone.
     shared["temp_x_humidity"] = temp * hum / 100.0
     shared["wind_x_temp"] = ws * temp / 100.0
-    shared["wind_x_season"] = ws * shared["month_sin"]
-    shared["humidity_x_season"] = hum * shared["doy_cos"] / 100.0
-    shared["precip_x_temp"] = precip * temp / 100.0
     # Rolling weather (at inference we only have current → use current as proxy)
     shared["temperature_3d"] = temp
     shared["humidity_3d"] = hum
@@ -853,10 +858,15 @@ def run_predictions_batch(df: pd.DataFrame, weather: dict, temporal: dict) -> np
     # temporal), then the training-median fill. df-first matters: the texas path
     # now writes per-tract weather columns that must not be shadowed by the
     # single shared scalar.
+    # Vectorized DataFrame cast
+    df_cols = [f for f in features if f in df.columns]
+    if df_cols:
+        df[df_cols] = df[df_cols].apply(pd.to_numeric, errors="coerce")
+
     for i, feat in enumerate(features):
         fill = float(feature_fill.get(feat, 0.0))
-        if feat in df.columns:
-            col = pd.to_numeric(df[feat], errors="coerce")
+        if feat in df_cols:
+            col = df[feat]
             if feat in shared:
                 col = col.fillna(float(shared[feat]))
             X[:, i] = col.fillna(fill).values
@@ -1485,7 +1495,7 @@ async def _revalidate_texas_background():
         return
     _revalidating["texas"] = True
     try:
-        # Refresh live air first if its cache has expired (cheap, ~1s, cached 3h).
+        # Refresh live air first if its cache has expired (cheap, ~1s; PURPLEAIR_CACHE_TTL_MIN, default 15m).
         pa_exp = _purpleair_cache.get("expires", datetime.min.replace(tzinfo=timezone.utc))
         if datetime.now(timezone.utc) >= pa_exp:
             await _revalidate_purpleair_background()
@@ -2001,3 +2011,19 @@ def get_live_purpleair_sensors() -> list:
                 pass  # no running loop (called outside async context)
         return cached.get("sensors", []) if cached.get("usable") else []
     return []
+
+@app.get("/api/geocode")
+async def proxy_geocode(q: str):
+    """Proxy Nominatim requests to set User-Agent properly."""
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "json", "countrycodes": "us"},
+                headers={"User-Agent": "SharedSkiesInitiative/1.0 (contact@example.com)"},
+                timeout=10.0
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail="Failed to reach geocoding service")

@@ -35,6 +35,7 @@ def haversine(lat1, lon1, lat2, lon2):
     a = (np.sin(dlat / 2) ** 2 +
          np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) *
          np.sin(dlon / 2) ** 2)
+    a = np.clip(a, 0.0, 1.0)
     return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
 
@@ -48,6 +49,7 @@ def _vectorized_min_dist(t_lats, t_lons, s_lats, s_lons):
         a = (np.sin(dlat / 2) ** 2 +
              np.cos(np.radians(t_lats)) * np.cos(np.radians(sl)) *
              np.sin(dlon / 2) ** 2)
+        a = np.clip(a, 0.0, 1.0)
         dists = 3959.0 * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
         min_dists = np.minimum(min_dists, dists)
     return min_dists
@@ -62,6 +64,7 @@ def _pairwise_dist_matrix(lats, lons):
     a = (np.sin(dlat / 2) ** 2 +
          np.cos(lat_r[:, None]) * np.cos(lat_r[None, :]) *
          np.sin(dlon / 2) ** 2)
+    a = np.clip(a, 0.0, 1.0)
     return 3959.0 * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
 

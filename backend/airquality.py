@@ -109,7 +109,11 @@ async def fetch_cell_features(cell_centers, include_met: bool = True) -> dict:
                 if r.status_code == 200:
                     payload = r.json()
                     if isinstance(payload, dict):
-                        payload = [payload]
+                        if payload.get("error"):
+                            print(f"[airquality] met API error: {payload.get('reason', payload)}")
+                            payload = []
+                        else:
+                            payload = [payload]
                     for i, loc in enumerate(payload):
                         d = loc.get("daily", {})
                         sw = d.get("shortwave_radiation_sum", [None])
@@ -160,7 +164,11 @@ async def fetch_weather_grid(lats, lons) -> dict:
                 return {"features": per_tract, "usable": False, "n_cells": len(cells)}
             payload = r.json()
             if isinstance(payload, dict):
-                payload = [payload]
+                if payload.get("error"):
+                    print(f"[weather-grid] met API error: {payload.get('reason', payload)}")
+                    payload = []
+                else:
+                    payload = [payload]
             for i, loc in enumerate(payload):
                 d = loc.get("daily", {})
                 def first(key):

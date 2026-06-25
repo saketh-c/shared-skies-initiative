@@ -124,6 +124,8 @@ function MapLifecycle() {
 const MapViewContent = forwardRef(
   ({ geojson, predictions, onTractSelect, onBackgroundClick, selectedGeoid, searchMarker, sensorMarkers, existingSensors, activeTab = "map" }, _ref) => {
     const { lang } = useContext(LanguageContext);
+    const langRef = useRef(lang);
+    useEffect(() => { langRef.current = lang; }, [lang]);
     const justClickedRef = useRef(false);
     const onTractSelectRef = useRef(onTractSelect);
     const selectedGeoidRef = useRef(selectedGeoid);
@@ -231,9 +233,6 @@ const MapViewContent = forwardRef(
       const geoid = normGeoid(feature.properties?.GEOID);
       layer.options.bubblingMouseEvents = false;
 
-      const rawName = feature.properties?.NAME ?? geoid;
-      const displayName = rawName.startsWith(t(lang, 'census_tract_prefix')) ? rawName : `${t(lang, 'census_tract_prefix')} ${rawName}`;
-
       layer.on({
         click: () => {
           // Polygon clicks are only meaningful on the Map tab. On the Sensors
@@ -261,6 +260,9 @@ const MapViewContent = forwardRef(
           e.target.bringToFront();
 
           if (!pred) return;
+          const currentLang = langRef.current;
+          const rawName = feature.properties?.NAME ?? geoid;
+          const displayName = rawName.startsWith(t(currentLang, 'census_tract_prefix')) ? rawName : `${t(currentLang, 'census_tract_prefix')} ${rawName}`;
           const county = pred.county ? pred.county.replace(/ County$/i, "") : "";
           const pt = e.containerPoint;
           setTooltipData({ name: displayName, pm25: pred.pm25, epaAqi: pred.epa_aqi ?? pm25ToEpaAqi(pred.pm25), color: pred.color, category: pred.category, county, x: pt.x, y: pt.y });

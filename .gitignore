@@ -26,12 +26,9 @@ pipeline/data_pull_cache/
 website/node_modules/
 website/dist/
 
-# Paper build artifacts
-paper/.DS_Store
-paper/*.aux
-paper/*.log
-paper/*.out
-paper/*.synctex.gz
+# Papers — kept locally only, not tracked in the repo
+paper/
+paper_hs/
 
 logs/
 

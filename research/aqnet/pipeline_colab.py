@@ -558,6 +558,7 @@ def stage_deep(args):
             "correction": args.correction,
             "window": [start, end],
             "stack_cache": stack_path,
+            "history": res.get("history"),
         })
         _say(f"deep: best holdout metrics {res['best']} -> {res['ckpt']}")
     except Exception as e:
@@ -1261,7 +1262,8 @@ def stage_validate(args):
                      f"{QUICK_START}..{QUICK_END} ({len(_aqs_df):,} site-days)")
             m = validation.external_aqs_validation(
                 predict_fn, aqs, geoscf_parquet=ext.get("geoscf"),
-                merra2_parquet=ext.get("merra2"))
+                merra2_parquet=ext.get("merra2"),
+                save_rows_to=artifact("external_aqs_predictions.parquet"))
             m["note"] = ("EPA AQS FRM/FEM monitors are fully held out: "
                          "never used in training or feature computation "
                          "for training rows.")
@@ -1441,6 +1443,16 @@ def _tier3_at_aqs(args, df, y, days, lat, lon, fitted, aqs_parquet,
     block["ridge_cols"] = list(ridge.get("cols") or [])
     block["n_unet_finite"] = int(np.isfinite(unet_site).sum())
     block["n_site_days"] = int(len(sf))
+
+    # Merge Tier-3 predictions into the per-site-day parquet (figure F12).
+    pred_path = artifact("external_aqs_predictions.parquet")
+    if os.path.exists(pred_path) and "site_id" in sf.columns:
+        t3 = sf[["site_id", "date"]].copy()
+        t3["pred_tier3"] = tier3_site
+        merged = pd.read_parquet(pred_path)
+        merged = merged.drop(columns=["pred_tier3"], errors="ignore").merge(
+            t3, on=["site_id", "date"], how="left")
+        merged.to_parquet(pred_path, index=False)
     return block
 
 

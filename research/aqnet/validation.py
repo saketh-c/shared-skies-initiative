@@ -638,7 +638,8 @@ def baseline_column(df, col, offset=0.0):
 # ── EPA AQS external validation ─────────────────────────────────────────────
 
 def external_aqs_validation(predict_fn, aqs_parquet, geoscf_parquet=None,
-                            merra2_parquet=None, correction="barkjohn"):
+                            merra2_parquet=None, correction="barkjohn",
+                            save_rows_to=None):
     """Score a fitted AQNet predictor against EPA AQS FRM/FEM daily PM2.5.
 
     Feature assembly is delegated to features.build_site_features — the one
@@ -718,4 +719,11 @@ def external_aqs_validation(predict_fn, aqs_parquet, geoscf_parquet=None,
         m = years == yr
         by_year[int(yr)] = metrics(y_true[m], y_pred[m])
     out["by_year"] = by_year
+
+    # Per-site-day predictions for downstream figures (F12 maps/scatter).
+    if save_rows_to:
+        rows = X[["site_id", "date", "lat", "lon", "pm25_aqs"]].copy()
+        rows["pred_tier1"] = y_pred
+        rows.to_parquet(save_rows_to, index=False)
+        print(f"[aqs] per-site-day predictions -> {save_rows_to}")
     return out

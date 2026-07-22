@@ -1,18 +1,33 @@
 """Extended gridded stacks for the AQNet deep tier (Tier2 FusionUNet).
 
 Reuses the deep-learning track's dataset builder (research/deeplearning/
-dataset.py) unchanged — this module never re-implements the gridding — and
-appends OPTIONAL channel groups sourced from the AQNet external-data
-fetchers (data_external.py):
+dataset.py) unchanged — this module never re-implements the gridding — then
+extends the base stack in four ways:
 
-  ctm     ["geoscf_pm25"]                              GEOS-CF surface PM2.5
-                                                       chemistry prior
-  merra2  ["merra2_dust25", "merra2_oc", "merra2_bc",  MERRA-2 aerosol species
-           "merra2_so4", "merra2_ss25", "merra2_pblh"]  + boundary-layer height
-                                                       (the derived pm25 proxy
-                                                       is excluded — the
-                                                       species channels already
-                                                       carry that signal)
+  aerosol  gains a "dust" channel: the CAMS dust column from
+           pipeline/airquality_by_cell.parquet, gridded nearest-cell exactly
+           like aod/cams_pm25 (NaN-tolerant — days or cells the archive does
+           not cover stay NaN planes).
+  temporal gains dow_sin/dow_cos day-of-week planes alongside the base
+           day-of-year pair (traffic-driven PM2.5 has a weekly cycle).
+  ctm      ["geoscf_pm25"]                              GEOS-CF surface PM2.5
+                                                        chemistry prior
+  merra2   ["merra2_dust25", "merra2_oc", "merra2_bc",  MERRA-2 aerosol species
+            "merra2_so4", "merra2_ss25", "merra2_pblh"]  + boundary-layer height
+                                                        (merra2_pm25_proxy and
+                                                        the tabular-only
+                                                        pblh_max/pblh_min
+                                                        columns are excluded —
+                                                        the group stays six
+                                                        channels)
+
+After every source group is built, a "flags" group is appended: one binary
+channel per source group, 1.0 on days the group had ANY real (finite) data
+pre-fill and 0.0 on days its planes were all NaN. Flag channels are computed
+BEFORE any fill (fill happens at train time in models_deep), are never NaN
+themselves, and let the fusion attention learn day-conditional trust — the
+flag-and-fill pattern: filled planes look plausible, the flag says whether
+the source actually reported that day.
 
 Each external parquet holds daily [date, lat, lon, value...] rows on the
 source's native grid and is regridded with the deep track's nearest-cell
@@ -57,20 +72,25 @@ import corrections
 import dataset as dl_dataset
 
 # Channel groups appended on top of the deep track's five source groups.
+# merra2_pm25_proxy (derived from the species channels) and the tabular-only
+# merra2_pblh_max/merra2_pblh_min columns are excluded so the U-Net merra2
+# group keeps its original six channels.
 CTM_CHANNELS = list(config.GEOSCF_FEATURES)
-MERRA2_CHANNELS = [c for c in config.MERRA2_FEATURES if c != "merra2_pm25_proxy"]
+_MERRA2_EXCLUDED = ("merra2_pm25_proxy", "merra2_pblh_max", "merra2_pblh_min")
+MERRA2_CHANNELS = [c for c in config.MERRA2_FEATURES if c not in _MERRA2_EXCLUDED]
 
 
 # ── External-source gridding ────────────────────────────────────────────────
 
 def _grid_daily_group(parquet_path, channels, dates, grid_pts, shape,
-                      label, verbose=True):
+                      label, lat_col="lat", lon_col="lon", verbose=True):
     """Grid a daily [date, lat, lon, value...] parquet onto the stack grid.
 
     Returns float32 (D, C, H, W), NaN wherever the source has no data for a
     day (or lacks a channel column entirely). Nearest-cell gridding via
     dataset._nearest keeps the coarse source cells crisp instead of blurring
-    them across cell boundaries.
+    them across cell boundaries. lat_col/lon_col name the coordinate columns
+    (the by-cell CAMS parquet uses cell_lat/cell_lon).
     """
     D = len(dates)
     arr = np.full((D, len(channels), shape[0], shape[1]), np.nan,
@@ -90,8 +110,8 @@ def _grid_daily_group(parquet_path, channels, dates, grid_pts, shape,
         if sub is None:
             continue
         n_hit += 1
-        p_lat = sub["lat"].values.astype(np.float64)
-        p_lon = sub["lon"].values.astype(np.float64)
+        p_lat = sub[lat_col].values.astype(np.float64)
+        p_lon = sub[lon_col].values.astype(np.float64)
         for j, col in present:
             arr[i, j] = dl_dataset._nearest(
                 p_lat, p_lon, sub[col].values.astype(np.float64),
@@ -100,6 +120,75 @@ def _grid_daily_group(parquet_path, channels, dates, grid_pts, shape,
         print(f"  [{label}] gridded {n_hit}/{D} days from "
               f"{os.path.basename(str(parquet_path))}")
     return arr
+
+
+# ── Base-group extensions (dust, day-of-week, flags) ────────────────────────
+
+def _append_aerosol_dust(data, grid_pts, shape, verbose=True):
+    """Append the CAMS "dust" channel to the base aerosol group.
+
+    Gridded nearest-cell from pipeline/airquality_by_cell.parquet exactly
+    like aod/cams_pm25 (the base builder only grids those two). NaN-tolerant:
+    days outside the CAMS archive, cells without data, or a missing parquet /
+    column leave NaN planes for fill_missing to handle at train time.
+    """
+    D = len(data["dates"])
+    if os.path.exists(dl_dataset.AQ_BY_CELL):
+        dust = _grid_daily_group(
+            dl_dataset.AQ_BY_CELL, ["dust"], data["dates"], grid_pts, shape,
+            "aerosol/dust", lat_col="cell_lat", lon_col="cell_lon",
+            verbose=verbose)
+    else:
+        if verbose:
+            print(f"  [aerosol/dust] parquet not found, channel stays NaN: "
+                  f"{dl_dataset.AQ_BY_CELL}")
+        dust = np.full((D, 1, shape[0], shape[1]), np.nan, dtype=np.float32)
+    data["groups"]["aerosol"] = np.concatenate(
+        [data["groups"]["aerosol"], dust], axis=1)
+    data["channels"]["aerosol"] = list(data["channels"]["aerosol"]) + ["dust"]
+
+
+def _append_temporal_dow(data):
+    """Append constant day-of-week sin/cos planes to the temporal group.
+
+    Complements the base builder's day-of-year pair: traffic-driven PM2.5
+    carries a weekly cycle the annual harmonics cannot express.
+    """
+    D = len(data["dates"])
+    H, W = len(data["lat"]), len(data["lon"])
+    dow = pd.DatetimeIndex(data["dates"]).dayofweek.to_numpy(dtype=np.float64)
+    ang = 2.0 * np.pi * dow / 7.0
+    planes = np.empty((D, 2, H, W), dtype=np.float32)
+    planes[:, 0] = np.sin(ang).astype(np.float32)[:, None, None]
+    planes[:, 1] = np.cos(ang).astype(np.float32)[:, None, None]
+    data["groups"]["temporal"] = np.concatenate(
+        [data["groups"]["temporal"], planes], axis=1)
+    data["channels"]["temporal"] = (list(data["channels"]["temporal"])
+                                    + ["dow_sin", "dow_cos"])
+
+
+def _append_flag_group(data, verbose=True):
+    """Append the "flags" group: one binary availability channel per source.
+
+    For each source group, the flag plane for a day is 1.0 when the group had
+    ANY real (finite) data that day and 0.0 when its planes were all NaN
+    pre-fill. Computed AFTER every group is built and BEFORE any fill (fill
+    happens at train time in models_deep), so the flags record true source
+    availability — the flag-and-fill pattern: filled planes look plausible,
+    and the flag lets the fusion attention learn day-conditional trust in
+    each source. Flag channels are never NaN.
+    """
+    names = list(data["groups"])
+    D = len(data["dates"])
+    H, W = len(data["lat"]), len(data["lon"])
+    flags = np.zeros((D, len(names), H, W), dtype=np.float32)
+    for j, name in enumerate(names):
+        has_data = np.isfinite(data["groups"][name]).any(axis=(1, 2, 3))
+        flags[has_data, j] = 1.0
+        if verbose:
+            print(f"  [flags] {name}: {int(has_data.sum())}/{D} days with data")
+    data["groups"]["flags"] = flags
+    data["channels"]["flags"] = [f"flag_{n}" for n in names]
 
 
 # ── Supervision target correction ───────────────────────────────────────────
@@ -160,11 +249,16 @@ def build_extended_stack(start=None, end=None, grid_deg=0.1,
     """Build the deep-track gridded stack plus optional external channels.
 
     Calls research/deeplearning/dataset.build_dataset for the five base
-    source groups (aerosol, smoke, meteorology, static, temporal), then
-    appends a "ctm" group when geoscf_parquet is given and a "merra2" group
-    when merra2_parquet is given, gridded nearest-cell on the same axes.
-    A path that does not exist is reported and skipped rather than failing,
-    so the stack degrades to the base channels when a fetch was unavailable.
+    source groups (aerosol, smoke, meteorology, static, temporal), extends
+    aerosol with the CAMS "dust" channel and temporal with dow_sin/dow_cos
+    planes, then appends a "ctm" group when geoscf_parquet is given and a
+    "merra2" group when merra2_parquet is given, gridded nearest-cell on the
+    same axes. A path that does not exist is reported and skipped rather than
+    failing, so the stack degrades to the base channels when a fetch was
+    unavailable. Last of all — after every group, before any fill — a binary
+    "flags" availability group is appended (one channel per source group; see
+    _append_flag_group), which is why the returned channels dict always ends
+    with "flags".
 
     Parameters
     ----------
@@ -188,6 +282,9 @@ def build_extended_stack(start=None, end=None, grid_deg=0.1,
     grid_pts = dl_dataset._grid_points(data["lat"], data["lon"])
     shape = (len(data["lat"]), len(data["lon"]))
 
+    _append_aerosol_dust(data, grid_pts, shape)
+    _append_temporal_dow(data)
+
     for name, channels, path in (("ctm", CTM_CHANNELS, geoscf_parquet),
                                  ("merra2", MERRA2_CHANNELS, merra2_parquet)):
         if path is None:
@@ -199,6 +296,7 @@ def build_extended_stack(start=None, end=None, grid_deg=0.1,
             str(path), channels, data["dates"], grid_pts, shape, name)
         data["channels"][name] = list(channels)
 
+    _append_flag_group(data)
     _apply_obs_correction(data, correction)
     return data
 

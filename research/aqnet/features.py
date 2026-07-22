@@ -6,15 +6,18 @@ mirrors the production 38-feature build (pipeline/06 + pipeline/03) with two
 deliberate departures:
 
   * Demographic EJScreen columns (config.EXCLUDED_DEMOGRAPHIC) are excluded
-    from every feature set. Only the physical source-proximity EJ features
-    (traffic / superfund / RMP / diesel-PM proximity) are used.
+    from every feature set — only the physical source-proximity EJ features
+    (traffic / superfund / RMP / diesel-PM proximity) are model inputs.
+    build_training_frame(keep_demographics=True) can retain the demographic
+    columns as REFERENCE columns (used solely by the ablation stage), but
+    feature_columns() never returns them.
   * The regression target is the Barkjohn et al. (2021) corrected PurpleAir
     PM2.5 (corrections.apply_target_correction), not the raw ATM reading.
 
 Sources (all repo-relative):
   pipeline/purpleair_full_dataset.parquet   sensor-day PM2.5 + met + EJ + time
   pipeline/hms_smoke_by_sensor.parquet      NOAA HMS smoke tier (0-3)
-  pipeline/airquality_by_cell.parquet       CAMS aod + cams_pm25 (0.5-deg cells)
+  pipeline/airquality_by_cell.parquet       CAMS aod + cams_pm25 + dust (0.5-deg)
   pipeline/elevations.json                  sensor + tract elevations
   pipeline/sensor_tx_membership.csv         in-Texas target membership
   backend/static/tract_lookup.parquet       tract centroids + EJScreen columns
@@ -27,7 +30,10 @@ gets true sensor positions.
 
 Neighbor features are same-day, leave-self-out, multi-radius aggregates and
 reuse pipeline/neighbor_features.compute_neighbor_features_df — the single
-source of truth shared with the production trainer. External CTM/reanalysis
+source of truth shared with the production trainer. For cross-validation,
+neighbor_features_per_fold() recomputes every nbr_* column against pools
+restricted to each fold's TRAIN rows, so the tabular tier can score held-out
+sensors without cross-fold neighbor leakage. External CTM/reanalysis
 products (GEOS-CF, MERRA-2 parquets from data_external.py) attach by nearest
 grid cell on the same day and stay NaN wherever a product has no coverage.
 
@@ -233,13 +239,16 @@ def _static_physical_features():
 
 # ── Sensor-day assembly ─────────────────────────────────────────────────────
 
-def load_sensor_days():
+def load_sensor_days(keep_demographics=False):
     """Sensor-day rows with sensor_id, date, lat, lon, pm25, GEOID, elevation
-    plus every non-neighbor PHYSICAL_FEATURE computable from repo files.
+    plus every non-neighbor PHYSICAL_FEATURE computable from repo files, and
+    any config.EXTRA_FEATURES column (CAMS dust) the aerosol parquet carries.
 
     Missing values are left as NaN (imputation is a modeling decision, not a
     data-assembly one). Demographic EJScreen columns are dropped here and never
-    reappear downstream.
+    reappear downstream — unless keep_demographics=True retains them as
+    REFERENCE columns for the ablation stage; feature_columns() still never
+    returns them.
     """
     df = pd.read_parquet(PA_DATASET)
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
@@ -253,8 +262,11 @@ def load_sensor_days():
     df["lat"] = df["latitude"].astype(float)
     df["lon"] = df["longitude"].astype(float)
 
-    # Demographic EJScreen columns are excluded from AQNet everywhere.
-    df = df.drop(columns=[c for c in config.EXCLUDED_DEMOGRAPHIC if c in df.columns])
+    # Demographic EJScreen columns are excluded from AQNet features everywhere;
+    # keep_demographics=True retains them ONLY as ablation reference columns.
+    if not keep_demographics:
+        df = df.drop(columns=[c for c in config.EXCLUDED_DEMOGRAPHIC
+                              if c in df.columns])
 
     if "GEOID" in df.columns:
         df["GEOID"] = df["GEOID"].astype(str).str.zfill(11)
@@ -293,13 +305,15 @@ def load_sensor_days():
     else:
         df["hms_smoke"] = np.int16(0)
 
-    # ── CAMS aerosol (aod + cams_pm25; archive starts 2022-08 -> NaN before).
-    # dust is intentionally not used: the production v5 audit measured its
-    # spatial-CV permutation importance as indistinguishable from zero.
-    aq_cols = [c for c in ("aod", "cams_pm25") if c not in df.columns]
+    # ── CAMS aerosol (aod + cams_pm25 + dust; archive starts 2022-08 -> NaN
+    # before). dust joins by the same nearest cell as a config.EXTRA_FEATURES
+    # column (tabular + dust-strata validation); NaN-tolerant — rows outside
+    # the archive stay NaN and feature_columns() lists it only when present.
+    aq_cols = [c for c in ("aod", "cams_pm25", "dust") if c not in df.columns]
     if aq_cols and os.path.exists(AQ_BY_CELL):
         aq = pd.read_parquet(AQ_BY_CELL)
-        df = _nearest_cell_join(df, aq, aq_cols, "cell_lat", "cell_lon")
+        df = _nearest_cell_join(df, aq, [c for c in aq_cols if c in aq.columns],
+                                "cell_lat", "cell_lon")
 
     # ── Elevation (sensor value where surveyed, else its tract centroid) ──
     if "elevation" not in df.columns and os.path.exists(ELEVATIONS):
@@ -320,6 +334,10 @@ def load_sensor_days():
 
     keep = ["sensor_id", "date", "lat", "lon", "pm25", "GEOID", "elevation"]
     keep += [f for f in static_feats if f not in keep]
+    keep += [c for c in config.EXTRA_FEATURES if c in df.columns and c not in keep]
+    if keep_demographics:
+        keep += [c for c in config.EXCLUDED_DEMOGRAPHIC
+                 if c in df.columns and c not in keep]
     return df[keep].reset_index(drop=True)
 
 
@@ -337,9 +355,12 @@ def add_neighbor_features(df, pool_df=None, value_col=None):
     pool_df optionally supplies the reference sensor readings (default: df
     itself). value_col picks the aggregated column; by default the corrected
     "target" when the pool has one, else raw "pm25", so neighbor features stay
-    in the same units as the regression target. Query rows without value_col
-    (e.g. AQS site-days, which have no PurpleAir reading) get NaN there and
-    fall through to the pool-mean fallback for zero-neighbor rows.
+    in the same units as the regression target. Pool rows with a non-finite
+    value_col (e.g. NaN Barkjohn targets from missing humidity) are dropped
+    from the POOL before any aggregation — they would otherwise poison the
+    same-day means — and the drop count is printed. Query rows without
+    value_col (e.g. AQS site-days, which have no PurpleAir reading) get NaN
+    there and fall through to the pool-mean fallback for zero-neighbor rows.
     """
     q = df.copy()
     p = df.copy() if pool_df is None else pool_df.copy()
@@ -352,6 +373,16 @@ def add_neighbor_features(df, pool_df=None, value_col=None):
             frame["latitude"] = frame["lat"]
         if "longitude" not in frame.columns:
             frame["longitude"] = frame["lon"]
+
+    # Drop non-finite pool readings BEFORE pooling (query rows keep their
+    # positions; only the reference set shrinks).
+    p_vals = pd.to_numeric(p[value_col], errors="coerce").to_numpy(dtype=np.float64)
+    p_bad = ~np.isfinite(p_vals)
+    if p_bad.any():
+        print(f"[features] neighbor pool: dropped {int(p_bad.sum()):,} rows "
+              f"with non-finite {value_col}")
+        p = p[~p_bad].reset_index(drop=True)
+
     if "sensor_id" not in q.columns:
         q["sensor_id"] = ["q%d" % i for i in range(len(q))]
     if value_col not in q.columns:
@@ -361,6 +392,52 @@ def add_neighbor_features(df, pool_df=None, value_col=None):
     out = df.copy()
     for col, arr in nbr.items():
         out[col] = arr
+    return out
+
+
+def neighbor_features_per_fold(df, folds):
+    """Recompute every nbr_* column against TRAIN-fold-only neighbor pools.
+
+    For each fold i in ``folds`` (a sequence of (train_idx, test_idx)
+    positional-index pairs over df's row order), all nbr_* columns are
+    recomputed for EVERY row of df with the pool restricted to that fold's
+    TRAIN rows (query = all rows, pool = train rows; the leave-self-out rule
+    still applies within the pool via sensor_id). Held-out sensors therefore
+    never contribute to any neighbor aggregate used to score them — the
+    cross-validation analogue of the production LOSO leakage fix in
+    pipeline/03_train_enhanced.loso_cv, sharing the same single-source
+    implementation (pipeline/neighbor_features.compute_neighbor_features_df).
+
+    Aggregates the corrected "target" column when present (else raw "pm25")
+    and drops non-finite pool readings per fold, both matching
+    add_neighbor_features so full-pool and per-fold columns stay in the same
+    units.
+
+    Returns {fold_index: {column_name: np.ndarray}} with FULL-LENGTH arrays
+    aligned to df row order — models_tabular.train_cv applies them to both
+    the train and test rows of each fold via fold_col_overrides, and
+    pipeline_colab persists them as f{fold}__{col} npz entries.
+    """
+    base = df.copy().reset_index(drop=True)
+    base["date"] = pd.to_datetime(base["date"]).dt.normalize()
+    if "latitude" not in base.columns:
+        base["latitude"] = base["lat"]
+    if "longitude" not in base.columns:
+        base["longitude"] = base["lon"]
+    value_col = "target" if "target" in base.columns else "pm25"
+
+    print(f"[features] per-fold neighbor recompute: {len(folds)} folds x "
+          f"{len(base):,} rows (value column: {value_col})")
+    out = {}
+    for i, (train_idx, _test_idx) in enumerate(folds):
+        pool = base.iloc[np.asarray(train_idx)].reset_index(drop=True)
+        vals = pd.to_numeric(pool[value_col], errors="coerce").to_numpy(dtype=np.float64)
+        bad = ~np.isfinite(vals)
+        if bad.any():
+            print(f"[features] fold {i}: dropped {int(bad.sum()):,} rows with "
+                  f"non-finite {value_col} from the neighbor pool")
+            pool = pool[~bad].reset_index(drop=True)
+        out[i] = compute_neighbor_features_df(base, pool, target_col=value_col)
     return out
 
 
@@ -395,7 +472,7 @@ def attach_external(df, geoscf_parquet=None, merra2_parquet=None):
 
 def build_training_frame(correction="barkjohn", geoscf_parquet=None,
                          merra2_parquet=None, in_texas_only=True,
-                         start=None, end=None):
+                         start=None, end=None, keep_demographics=False):
     """Full sensor-day training frame: assembly + target correction.
 
     Order matters: the target correction is applied FIRST so the neighbor
@@ -405,11 +482,16 @@ def build_training_frame(correction="barkjohn", geoscf_parquet=None,
     becoming prediction targets. start/end optionally narrow the date window
     (used by smoke tests).
 
+    keep_demographics=True retains the four config.EXCLUDED_DEMOGRAPHIC
+    columns in the frame as REFERENCE columns — used ONLY by the ablation
+    stage, which builds its plus_demographics feature list explicitly.
+    feature_columns() never returns them regardless.
+
     Returns sensor_id, date, lat, lon, target (+ raw pm25, GEOID, elevation,
     in_tx for reference) and every feature column; run feature_columns() on
     the result to get the model input list.
     """
-    df = load_sensor_days()
+    df = load_sensor_days(keep_demographics=keep_demographics)
     if start is not None:
         df = df[df["date"] >= pd.Timestamp(start)]
     if end is not None:
@@ -435,25 +517,34 @@ def build_training_frame(correction="barkjohn", geoscf_parquet=None,
     keep = ["sensor_id", "date", "lat", "lon", "target",
             "pm25", "GEOID", "elevation", "in_tx"]
     keep += [f for f in feats if f not in keep]
+    if keep_demographics:
+        keep += [c for c in config.EXCLUDED_DEMOGRAPHIC
+                 if c in df.columns and c not in keep]
     return df[keep].reset_index(drop=True)
 
 
 def feature_columns(df):
-    """Model input columns: PHYSICAL_FEATURES + external features present.
+    """Model input columns: PHYSICAL_FEATURES, then whichever
+    config.EXTRA_FEATURES are present (CAMS dust), then external features.
 
-    Raises if any physical feature is missing and ASSERTS that no excluded
-    demographic column is present — the hard methodological guarantee that
-    demographics never enter prediction.
+    Raises if any physical feature is missing and ASSERTS that the RETURNED
+    list contains no excluded demographic column — the hard methodological
+    guarantee that demographics never enter prediction. The check is on the
+    returned list (not the frame), so frames built with
+    keep_demographics=True may carry the demographic REFERENCE columns; they
+    are still never returned here.
     """
-    banned = [c for c in config.EXCLUDED_DEMOGRAPHIC if c in df.columns]
-    assert not banned, f"demographic columns must never reach a model frame: {banned}"
     missing = [f for f in config.PHYSICAL_FEATURES if f not in df.columns]
     if missing:
         raise KeyError(f"frame is missing physical features: {missing} "
                        f"(build with load_sensor_days + add_neighbor_features)")
-    extra = [c for c in list(config.GEOSCF_FEATURES) + list(config.MERRA2_FEATURES)
-             if c in df.columns]
-    return list(config.PHYSICAL_FEATURES) + extra
+    feats = list(config.PHYSICAL_FEATURES)
+    feats += [c for c in config.EXTRA_FEATURES if c in df.columns]
+    feats += [c for c in list(config.GEOSCF_FEATURES) + list(config.MERRA2_FEATURES)
+              if c in df.columns]
+    banned = [c for c in feats if c in config.EXCLUDED_DEMOGRAPHIC]
+    assert not banned, f"demographic columns must never enter the feature list: {banned}"
+    return feats
 
 
 # ── Arbitrary site-days (external AQS validation) ───────────────────────────
@@ -508,7 +599,7 @@ def build_site_features(sites, correction="barkjohn", geoscf_parquet=None,
 
       met (5 cols)          same-day IDW from the k=8 nearest PurpleAir sensors
       hms_smoke             same-day nearest-sensor tier (0 = no smoke)
-      aod / cams_pm25       nearest 0.5-deg CAMS cell, same day
+      aod/cams_pm25/dust    nearest 0.5-deg CAMS cell, same day
       EJ physical, elevation nearest tract centroid (GEOID)
       dist_to_*             coast reference points / nearest PurpleAir sensor
       neighbor features     leave-self-out over the PurpleAir pool (corrected)
@@ -547,11 +638,11 @@ def build_site_features(sites, correction="barkjohn", geoscf_parquet=None,
         s[c] = met[c]
     s["hms_smoke"] = hms.astype("int16")
 
-    # ── CAMS aerosol ──
+    # ── CAMS aerosol (dust included, matching load_sensor_days) ──
     if os.path.exists(AQ_BY_CELL):
         aq = pd.read_parquet(AQ_BY_CELL)
-        s = _nearest_cell_join(s, aq, [c for c in ("aod", "cams_pm25")
-                                       if c not in s.columns],
+        s = _nearest_cell_join(s, aq, [c for c in ("aod", "cams_pm25", "dust")
+                                       if c not in s.columns and c in aq.columns],
                                "cell_lat", "cell_lon")
 
     # ── Tract join: GEOID, physical EJ proximity, elevation ──

@@ -7,9 +7,13 @@ Leakage discipline (the rules that make the stack publishable):
     test-fold rows. The held-out sensor's own readings never inform its
     kriged residual, and the residuals themselves come from out-of-fold
     Tier-1 predictions, so no fold ever sees its own targets.
-  - stack_meta trains ONLY on out-of-fold component predictions (Tier-1
-    blend, Tier-2 U-Net pixels, kriged residual, CTM priors, ...). Pass a
-    mask to hold out the conformal calibration split from meta training.
+  - stack_meta / cross_fit_meta train ONLY on out-of-fold component
+    predictions — canonically {"tier1": LOFO Tier-1 blend, "rk": kriged
+    residual, "unet": Tier-2 pixel OOF}. The kriged residual enters as its
+    own component (the Ridge learns its weight; callers never hand-build a
+    tier1 + rk sum). cross_fit_meta additionally cross-fits the combiner
+    over grouped sensor folds, so the meta prediction itself is out-of-fold.
+    Pass a mask to stack_meta to hold out the conformal calibration split.
   - conformal_intervals implements split-conformal widening (conformalized
     quantile regression scores, Romano et al. 2019): calibration rows must be
     disjoint from every set used to fit the meta-learner or quantile heads.
@@ -257,6 +261,104 @@ def predict_meta(meta, parts):
     return np.maximum(0.0, model.predict(M))
 
 
+def cross_fit_meta(y, parts, groups, n_folds=4, seed=42):
+    """Cross-fitted meta-learner: grouped K-fold Ridge over sensor ids.
+
+    stack_meta fits ONE combiner and its in-sample prediction is therefore
+    not out-of-fold with respect to the combiner itself. cross_fit_meta
+    closes that gap: unique `groups` values (sensor ids) are shuffled with
+    `seed` and dealt into `n_folds` parts; for each fold a
+    Ridge(positive=True) is fit on every OTHER fold's rows and predicts the
+    held-out fold's rows, so each row's meta prediction comes from a combiner
+    that never saw that row's sensor — a fully out-of-fold Tier-3 estimate.
+
+    y:      target array.
+    parts:  dict name -> out-of-fold component predictions aligned with y
+            (canonically {"tier1", "rk", "unet"}; see the module docstring).
+    groups: per-row group labels (sensor ids) driving the grouped folds.
+    n_folds, seed: fold count (capped at the number of unique groups) and
+            group-shuffle seed.
+
+    Returns (oof_pred, models, used_cols):
+      oof_pred  full-length array; each row is predicted by the fold model
+                that held its group out (NaN components filled with that
+                model's training means, output clipped at 0). Rows never in
+                any fold stay NaN.
+      models    per-fold Ridge models, each carrying used_cols_ / col_fill_
+                exactly like stack_meta's, so predict_meta accepts any of
+                them standalone.
+      used_cols component names surviving the same coverage screen as
+                stack_meta — decided ONCE globally so every fold shares one
+                design matrix.
+    """
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    groups = np.asarray(groups)
+    if len(groups) != n:
+        raise ValueError(f"cross_fit_meta: groups has length {len(groups)}, "
+                         f"expected {n}")
+    cand = np.isfinite(y)
+    if not cand.any():
+        raise ValueError("cross_fit_meta: no rows with finite y")
+
+    # Coverage screen (global, mirroring stack_meta's 0.5% threshold).
+    used_cols = []
+    for name, arr in parts.items():
+        arr = np.asarray(arr, dtype=float)
+        if len(arr) != n:
+            raise ValueError(f"cross_fit_meta: part '{name}' has length "
+                             f"{len(arr)}, expected {n}")
+        cov = float(np.isfinite(arr[cand]).mean())
+        if cov < 0.005:
+            print(f"[cross_fit_meta] dropping '{name}' — {cov * 100:.1f}% "
+                  f"finite coverage on candidate rows")
+            continue
+        used_cols.append(name)
+    if not used_cols:
+        raise ValueError("cross_fit_meta: every component was dropped "
+                         "(all-NaN inputs)")
+
+    M = np.column_stack([np.asarray(parts[c], dtype=float) for c in used_cols])
+    fit_ok = cand & np.all(np.isfinite(M), axis=1)
+
+    uniq = np.unique(groups)
+    if len(uniq) < 2:
+        raise ValueError("cross_fit_meta: need at least 2 groups for "
+                         "grouped folds")
+    rng = np.random.default_rng(seed)
+    rng.shuffle(uniq)
+    n_folds = int(min(n_folds, len(uniq)))
+
+    oof = np.full(n, np.nan)
+    models = []
+    print(f"[cross_fit_meta] {n_folds} grouped folds over {len(uniq)} groups, "
+          f"cols={used_cols}")
+    for fi, part in enumerate(np.array_split(uniq, n_folds)):
+        te_mask = np.isin(groups, part)
+        tr_mask = fit_ok & ~te_mask
+        if int(tr_mask.sum()) < 10:
+            raise ValueError(f"cross_fit_meta: fold {fi + 1} has only "
+                             f"{int(tr_mask.sum())} usable train rows")
+        model = Ridge(alpha=1.0, positive=True, fit_intercept=True)
+        model.fit(M[tr_mask], y[tr_mask])
+        model.used_cols_ = list(used_cols)
+        model.col_fill_ = {c: float(np.nanmean(M[tr_mask][:, j]))
+                           for j, c in enumerate(used_cols)}
+        Mte = M[te_mask].copy()
+        for j, c in enumerate(used_cols):
+            bad = ~np.isfinite(Mte[:, j])
+            if bad.any():
+                Mte[bad, j] = model.col_fill_[c]
+        oof[te_mask] = np.maximum(0.0, model.predict(Mte))
+        models.append(model)
+        coef_str = "  ".join(f"{c}:{w:.3f}"
+                             for c, w in zip(used_cols, model.coef_))
+        print(f"  fold {fi + 1}/{n_folds}: train {int(tr_mask.sum()):,} rows, "
+              f"predict {int(te_mask.sum()):,}  "
+              f"intercept={model.intercept_:.3f}  {coef_str}")
+    return oof, models, used_cols
+
+
 # ── Split-conformal interval calibration ──
 def conformal_intervals(y_calib, lo_calib, hi_calib, alpha=0.1):
     """Split-conformal widening delta for quantile intervals (CQR scores).
@@ -291,6 +393,30 @@ def conformal_intervals(y_calib, lo_calib, hi_calib, alpha=0.1):
     return delta
 
 
+def conformal_recenter(meta_pred, q05, q50, q95):
+    """Re-center the Tier-1 quantile band on the Tier-3 meta prediction.
+
+    The quantile heads describe the SHAPE of predictive uncertainty around
+    their own median, while the headline point prediction is the
+    meta-learner's. Keep the band's half-widths but move its center:
+
+        lo = meta_pred - (q50 - q05)
+        hi = meta_pred + (q95 - q50)
+
+    The recentered band must then be calibrated with conformal_intervals
+    (CQR scores on a disjoint calibration split), which restores
+    finite-sample coverage regardless of the recentering. Returns (lo, hi)
+    arrays aligned with meta_pred.
+    """
+    meta_pred = np.asarray(meta_pred, dtype=float)
+    q05 = np.asarray(q05, dtype=float)
+    q50 = np.asarray(q50, dtype=float)
+    q95 = np.asarray(q95, dtype=float)
+    lo = meta_pred - (q50 - q05)
+    hi = meta_pred + (q95 - q50)
+    return lo, hi
+
+
 # ── Smoke test (synthetic data — no repo files touched) ──
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
@@ -311,7 +437,7 @@ if __name__ == "__main__":
     kriged = residual_kriging_oof(demo, oof, demo_folds)
     print(f"[smoke] kriged residual finite rows: {np.isfinite(kriged).sum()}/{n}")
 
-    parts = {"tier1": oof, "krig_adj": oof + kriged,
+    parts = {"tier1": oof, "rk": kriged,
              "dead": np.full(n, np.nan)}
     calib = np.zeros(n, dtype=bool)
     calib[idx[: n // 5]] = True
@@ -319,7 +445,13 @@ if __name__ == "__main__":
     pred = predict_meta(meta, parts)
     print(f"[smoke] meta pred range: {pred.min():.2f}-{pred.max():.2f}")
 
-    lo, hi = pred - 2.0, pred + 2.0
+    groups = rng.integers(0, 40, n)  # pseudo sensor ids for grouped folds
+    oof_meta, cf_models, cf_cols = cross_fit_meta(
+        demo["target"].to_numpy(), parts, groups, n_folds=4, seed=42)
+    print(f"[smoke] cross_fit_meta finite rows: "
+          f"{int(np.isfinite(oof_meta).sum())}/{n}  cols={cf_cols}")
+
+    lo, hi = conformal_recenter(pred, pred - 2.0, pred, pred + 2.0)
     delta = conformal_intervals(demo["target"].to_numpy()[calib],
                                 lo[calib], hi[calib], alpha=0.1)
     cover = np.mean((demo["target"].to_numpy()[calib] >= lo[calib] - delta)

@@ -92,9 +92,19 @@ _leak = set(PHYSICAL_FEATURES) & set(EXCLUDED_DEMOGRAPHIC)
 if _leak:
     raise RuntimeError(f"Demographic features leaked into PHYSICAL_FEATURES: {sorted(_leak)}")
 
+# Extra tabular features beyond the production physical list. "dust" is the
+# CAMS dust-aerosol column that features.load_sensor_days joins by nearest
+# cell alongside aod/cams_pm25; feature_columns() appends whichever of these
+# are present after the physical features, before the externals.
+EXTRA_FEATURES = ["dust"]
+
 # External-data feature names (NaN wherever a source was not fetched).
+# merra2_pblh_max / merra2_pblh_min are TABULAR-ONLY: the U-Net merra2
+# channel group keeps its original six channels, so grids.py must exclude
+# them (alongside merra2_pm25_proxy) when deriving its channel list.
 MERRA2_FEATURES = ["merra2_dust25", "merra2_oc", "merra2_bc", "merra2_so4",
-                   "merra2_ss25", "merra2_pm25_proxy", "merra2_pblh"]
+                   "merra2_ss25", "merra2_pm25_proxy", "merra2_pblh",
+                   "merra2_pblh_max", "merra2_pblh_min"]
 GEOSCF_FEATURES = ["geoscf_pm25"]
 
 # ── External sources ────────────────────────────────────────────────────────

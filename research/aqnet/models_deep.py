@@ -1,12 +1,26 @@
 """Tier2 deep model for AQNet: FusionUNet on the extended gridded stack.
 
 Reuses the deep-learning research track wholesale — FusionUNet from
-research/deeplearning/models.py plus the data/loss/eval utilities from
+research/deeplearning/models.py plus the data/eval utilities from
 research/deeplearning/train.py — rather than duplicating any of it. On top
-of that track's training loop this module adds:
+of that track's setup this module runs its own training loop with:
 
-  * cosine learning-rate decay (CosineAnnealingLR over the epoch budget)
-  * early stopping on held-out-site RMSE with a configurable patience
+  * masked Huber loss (delta=15.0) replacing train.py's masked MSE — same
+    masking semantics, robust to wildfire-day outlier readings
+  * AdamW (weight_decay=1e-3), 5-epoch linear warmup then CosineAnnealingLR
+    over the remaining epoch budget
+  * mixed precision (torch.amp autocast + GradScaler), auto-enabled on CUDA
+  * random-crop augmentation: 96x96 training crops (crops with an empty
+    supervision mask are skipped; evaluation stays full-grid)
+  * modality dropout: per batch, each source group is zeroed with
+    probability 0.15 AFTER normalization ("flags" channels are exempt so the
+    availability signal survives)
+  * normalization statistics computed over FINITE pixels BEFORE filling
+    (nanmean/nanstd), so fill values never distort the spread
+  * batch size auto-selection (32 on CUDA / 8 on CPU) plus pinned-memory
+    two-worker loading on CUDA
+  * optional early stopping on held-out-site RMSE (patience=None default
+    runs the full budget; best-checkpoint selection is the safety net)
 
 Validation keeps the grouped SITE holdout from train.py: entire sensor
 pixels are held out for all of their days, mirroring the leave-one-sensor-out
@@ -76,19 +90,206 @@ def _resolve_device(torch, device):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# ── Loss, normalization, crops ──────────────────────────────────────────────
+
+HUBER_DELTA = 15.0
+
+
+def masked_huber(pred, y, mask, delta=HUBER_DELTA):
+    """Huber loss over masked pixels only; safe when a batch has an empty mask.
+
+    Same masking semantics as train.masked_mse (sum over masked pixels,
+    denominator clamped at 1). delta=15.0 keeps the loss quadratic through
+    ordinary PM2.5 errors while damping the gradient of extreme wildfire-day
+    residuals, so a handful of smoke spikes cannot dominate an epoch.
+    """
+    import torch.nn.functional as F
+    per_px = F.huber_loss(pred, y, reduction="none", delta=delta)
+    num = (per_px * mask).sum()
+    den = mask.sum().clamp_min(1.0)
+    return num / den
+
+
+def _compute_norm_stats_prefill(groups):
+    """Per-channel mean/std over FINITE pixels only, BEFORE any filling.
+
+    train.py computes its statistics after fill_missing, which shrinks each
+    std toward zero on sparsely-covered channels (filled pixels sit exactly
+    at the mean). Computing nanmean/nanstd-style statistics pre-fill keeps
+    the normalization honest about the real spread. Returns the same
+    {group: {"mean": [...], "std": [...]}} schema as
+    dataset.compute_norm_stats (std floored at 1e-6). The binary "flags"
+    channels are never NaN and get identity stats (mean 0, std 1) so the 0/1
+    availability signal reaches the fusion attention unscaled.
+    """
+    stats = {}
+    for name, arr in groups.items():
+        if name == "flags":
+            stats[name] = {"mean": [0.0] * arr.shape[1],
+                           "std": [1.0] * arr.shape[1]}
+            continue
+        means, stds = [], []
+        for c in range(arr.shape[1]):
+            ch = arr[:, c]
+            finite = ch[np.isfinite(ch)]
+            if finite.size:
+                mean = float(finite.mean(dtype=np.float64))
+                std = float(finite.std(dtype=np.float64))
+            else:
+                mean, std = 0.0, 1.0
+            means.append(mean)
+            stds.append(max(std, 1e-6))
+        stats[name] = {"mean": means, "std": stds}
+    return stats
+
+
+class _CropDayDataset:
+    """Random training crops; duck-types the map-style Dataset protocol.
+
+    (A plain class rather than a torch.utils.data.Dataset subclass so the
+    module stays importable without torch.) One item per day that has at
+    least one supervised pixel: a random crop_size x crop_size window of
+    every channel group plus the matching target/mask crops. Windows whose
+    supervision mask comes up empty are re-drawn (up to max_tries), after
+    which the window is centered on a random supervised pixel, so every
+    yielded crop carries supervision; evaluation stays full-grid via
+    train.DayDataset. Grids smaller than crop_size are edge-padded (inputs)
+    and zero-padded (target/mask) up front. Crop offsets come from torch's
+    RNG, which DataLoader seeds per worker.
+    """
+
+    def __init__(self, groups, y, mask, crop_size=96, max_tries=8):
+        pad_h = max(crop_size - y.shape[1], 0)
+        pad_w = max(crop_size - y.shape[2], 0)
+        if pad_h or pad_w:
+            groups = {name: np.pad(arr, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)),
+                                   mode="edge")
+                      for name, arr in groups.items()}
+            y = np.pad(y, ((0, 0), (0, pad_h), (0, pad_w)))
+            mask = np.pad(mask, ((0, 0), (0, pad_h), (0, pad_w)))
+        self.groups = groups
+        self.y = y
+        self.mask = mask
+        self.crop = int(crop_size)
+        self.max_tries = int(max_tries)
+        # Days without any supervised pixel cannot yield a useful crop.
+        self.days = np.where(mask.reshape(mask.shape[0], -1).any(axis=1))[0]
+
+    def __len__(self):
+        return len(self.days)
+
+    def __getitem__(self, i):
+        import torch
+        d = int(self.days[i])
+        height, width = self.y.shape[1:]
+        cs = self.crop
+        r0 = c0 = 0
+        for _ in range(self.max_tries):
+            r0 = int(torch.randint(0, height - cs + 1, (1,)).item())
+            c0 = int(torch.randint(0, width - cs + 1, (1,)).item())
+            if self.mask[d, r0:r0 + cs, c0:c0 + cs].any():
+                break
+        else:
+            rr, cc = np.nonzero(self.mask[d])
+            j = int(torch.randint(0, len(rr), (1,)).item())
+            r0 = min(max(int(rr[j]) - cs // 2, 0), height - cs)
+            c0 = min(max(int(cc[j]) - cs // 2, 0), width - cs)
+        g = {name: torch.from_numpy(
+                 np.ascontiguousarray(arr[d, :, r0:r0 + cs, c0:c0 + cs]))
+             for name, arr in self.groups.items()}
+        y = torch.from_numpy(
+            np.ascontiguousarray(self.y[d, r0:r0 + cs, c0:c0 + cs]))
+        m = torch.from_numpy(
+            np.ascontiguousarray(self.mask[d, r0:r0 + cs, c0:c0 + cs]))
+        return g, y, m
+
+
+def _run_epoch(model, loader, optimizer, device, rng, scaler=None,
+               modality_dropout=0.15):
+    """One training pass with masked Huber loss, per-batch modality dropout,
+    and optional mixed precision; returns the mean loss over batches.
+
+    Modality dropout: per batch, each channel group except "flags" is
+    independently zeroed with probability modality_dropout. Inputs are
+    already normalized, so zeros equal the per-channel mean — the model sees
+    the source as "missing" while its flag channel still reports it existed,
+    which forces the attention to hedge across sources instead of leaning on
+    any single one.
+    """
+    import torch
+    model.train()
+    total, n_batches = 0.0, 0
+    for g, y, mask in loader:
+        g = {k: v.to(device, non_blocking=True) for k, v in g.items()}
+        y = y.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
+        if modality_dropout > 0:
+            for name in g:
+                if name != "flags" and rng.random() < modality_dropout:
+                    g[name] = torch.zeros_like(g[name])
+        optimizer.zero_grad(set_to_none=True)
+        if scaler is not None:
+            with torch.autocast(device_type="cuda"):
+                pred, _ = model(g)
+                loss = masked_huber(pred.squeeze(1), y, mask)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            pred, _ = model(g)
+            loss = masked_huber(pred.squeeze(1), y, mask)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
+        total += float(loss.item())
+        n_batches += 1
+    return total / max(n_batches, 1)
+
+
+def _make_grad_scaler(torch):
+    """GradScaler across torch versions (torch.amp first, cuda.amp fallback)."""
+    try:
+        return torch.amp.GradScaler("cuda")
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler()
+
+
+def _make_scheduler(torch, optimizer, epochs, warmup_epochs=5):
+    """Linear warmup then cosine annealing over the remaining budget.
+
+    Returns (scheduler, warmup_used); a budget shorter than the warmup gets
+    the warmup ramp alone.
+    """
+    sched = torch.optim.lr_scheduler
+    warmup = min(warmup_epochs, epochs)
+    warm = sched.LinearLR(optimizer, start_factor=1.0 / max(warmup, 1),
+                          end_factor=1.0, total_iters=warmup)
+    if epochs <= warmup:
+        return warm, warmup
+    cosine = sched.CosineAnnealingLR(optimizer, T_max=max(epochs - warmup, 1))
+    return sched.SequentialLR(optimizer, schedulers=[warm, cosine],
+                              milestones=[warmup]), warmup
+
+
 # ── Training ────────────────────────────────────────────────────────────────
 
 def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
                       holdout_frac=0.2, seed=42, device="auto",
-                      checkpoint_dir=None, patience=15):
+                      checkpoint_dir=None, patience=None, batch_size=None,
+                      use_amp=None, crop_size=96, modality_dropout=0.15):
     """Train FusionUNet on a (possibly extended) gridded stack.
 
-    Fills and normalizes a private copy of the stack's channel groups (the
+    Normalizes and fills a private copy of the stack's channel groups (the
     caller's arrays are left untouched, so the same stack can later be passed
-    to unet_pixel_oof), splits sensor SITES into train/validation with
-    train.split_sites, and runs the train.py loop with two additions: cosine
-    learning-rate decay over the epoch budget and early stopping once the
-    held-out-site RMSE has not improved for `patience` epochs.
+    to unet_pixel_oof; normalization statistics come from FINITE pixels
+    before filling — see _compute_norm_stats_prefill), splits sensor SITES
+    into train/validation with train.split_sites, and runs this module's own
+    loop: masked Huber loss, AdamW with 5-epoch linear warmup into cosine
+    annealing, random-crop augmentation, per-batch modality dropout, and
+    mixed precision on CUDA. Validation is always full-grid via
+    train.evaluate.
 
     Parameters
     ----------
@@ -100,14 +301,27 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
     holdout_frac : float
         Fraction of sensor sites held out for validation.
     seed : int
-        Seed for the site split and weight init.
+        Seed for the site split, weight init, and modality dropout.
     device : str
         "auto" | "cpu" | "cuda".
     checkpoint_dir : str or None
         Where to write fusion_unet_best.pt / fusion_unet_last.pt; defaults
         to <ARTIFACTS_DIR>/unet.
-    patience : int
-        Early-stopping patience in epochs (measured on validation RMSE).
+    patience : int or None
+        Early-stopping patience in epochs (on validation RMSE). None (the
+        default) runs the full budget — best-checkpoint selection is the
+        safety net.
+    batch_size : int or None
+        None auto-selects 32 on CUDA / 8 on CPU.
+    use_amp : bool or None
+        Mixed precision (torch.amp autocast + GradScaler). None auto-enables
+        on CUDA; forced off on CPU.
+    crop_size : int
+        Side of the random training crops (grids smaller than this are
+        padded). Evaluation always uses the full grid.
+    modality_dropout : float
+        Per-batch probability of zeroing each source group after
+        normalization ("flags" channels are exempt).
 
     Returns
     -------
@@ -121,7 +335,17 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
     torch.manual_seed(seed)
     np.random.seed(seed)
     dev = _resolve_device(torch, device)
-    print(f"Device: {dev}")
+    on_cuda = dev.type == "cuda"
+    if use_amp is None:
+        use_amp = on_cuda
+    use_amp = bool(use_amp) and on_cuda  # autocast("cuda") needs a GPU
+    if batch_size is None:
+        batch_size = 32 if on_cuda else 8
+    num_workers = 2 if on_cuda else 0
+    pin_memory = on_cuda
+    print(f"Device: {dev}  batch_size {batch_size}  "
+          f"amp {'on' if use_amp else 'off'}  crop {crop_size}  "
+          f"modality_dropout {modality_dropout}")
 
     # ── Data (private copy: fills/normalization must not leak to caller) ──
     groups = {name: arr.copy() for name, arr in stack["groups"].items()}
@@ -129,8 +353,10 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
     n_days = len(stack["dates"])
     height, width = len(stack["lat"]), len(stack["lon"])
 
+    # Statistics over finite pixels FIRST, then fill, then normalize — the
+    # fill values (finite means) land at ~0 in normalized space.
+    norm_stats = _compute_norm_stats_prefill(groups)
     fill_values = dl_dataset.fill_missing(groups)
-    norm_stats = dl_dataset.compute_norm_stats(groups)
     dl_dataset.apply_norm_stats(groups, norm_stats)
 
     train_keep, val_keep, val_sites = dl_train.split_sites(
@@ -143,11 +369,13 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
     y_tr, m_tr = dl_train.rasterize_targets(obs, train_keep, n_days, height, width)
     y_va, m_va = dl_train.rasterize_targets(obs, val_keep, n_days, height, width)
 
-    batch_size = 8
-    train_loader = DataLoader(dl_train.DayDataset(groups, y_tr, m_tr),
-                              batch_size=batch_size, shuffle=True)
+    train_data = _CropDayDataset(groups, y_tr, m_tr, crop_size=crop_size)
+    print(f"Training crops: {len(train_data)}/{n_days} days with supervision")
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory)
     val_loader = DataLoader(dl_train.DayDataset(groups, y_va, m_va),
-                            batch_size=batch_size, shuffle=False)
+                            batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=pin_memory)
 
     # ── Model / optimizer / schedule ──
     group_channels = {name: len(chs) for name, chs in stack["channels"].items()}
@@ -155,9 +383,10 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
                                  base_width=base_width).to(dev)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"FusionUNet: {n_params:,} parameters, groups {group_channels}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(epochs, 1))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
+    scheduler, warmup_used = _make_scheduler(torch, optimizer, epochs)
+    scaler = _make_grad_scaler(torch) if use_amp else None
+    drop_rng = np.random.default_rng(seed)
 
     if checkpoint_dir is None:
         checkpoint_dir = os.path.join(config.ARTIFACTS_DIR, "unet")
@@ -169,9 +398,17 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
                 "holdout_frac": holdout_frac, "seed": seed,
                 "embed_dim": embed_dim, "base_width": base_width,
                 "device": str(dev), "patience": patience,
-                "scheduler": "cosine", "source": "research/aqnet/models_deep.py"}
+                "optimizer": "adamw", "weight_decay": 1e-3,
+                "scheduler": "linear_warmup+cosine",
+                "warmup_epochs": warmup_used,
+                "loss": "masked_huber", "huber_delta": HUBER_DELTA,
+                "use_amp": use_amp, "crop_size": crop_size,
+                "modality_dropout": modality_dropout,
+                "num_workers": num_workers, "pin_memory": pin_memory,
+                "norm_stats": "finite_prefill",
+                "source": "research/aqnet/models_deep.py"}
 
-    # ── Loop with cosine decay + early stopping ──
+    # ── Loop: warmup+cosine schedule, optional early stopping ──
     best_metrics = None
     best_rmse = float("inf")
     since_best = 0
@@ -182,7 +419,9 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
     for epoch in range(1, epochs + 1):
         t0 = time.time()
         lr_now = optimizer.param_groups[0]["lr"]
-        train_loss = dl_train.run_epoch(model, train_loader, optimizer, dev)
+        train_loss = _run_epoch(model, train_loader, optimizer, dev, drop_rng,
+                                scaler=scaler,
+                                modality_dropout=modality_dropout)
         scheduler.step()
         metrics = dl_train.evaluate(model, val_loader, dev)
         dt = time.time() - t0
@@ -225,7 +464,7 @@ def train_fusion_unet(stack, epochs=100, lr=1e-3, base_width=32, embed_dim=32,
               f"val R2 {metrics['r2']:.4f}  RMSE {metrics['rmse']:.3f}  "
               f"MAE {metrics['mae']:.3f}  lr {lr_now:.2e}  "
               f"({metrics['n']:,} px)  {dt:.1f}s{marker}")
-        if since_best >= patience:
+        if patience is not None and since_best >= patience:
             early_stopped = True
             print(f"Early stop: no val RMSE improvement in {patience} epochs "
                   f"(best {best_rmse:.3f} at epoch {best_metrics['epoch']})")
@@ -392,7 +631,15 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="auto", help="auto | cpu | cuda")
     ap.add_argument("--checkpoint-dir", default=None)
-    ap.add_argument("--patience", type=int, default=15)
+    ap.add_argument("--patience", type=int, default=None,
+                    help="early-stop patience in epochs; default runs the "
+                         "full budget (best checkpoint is kept regardless)")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="default auto: 32 on CUDA, 8 on CPU")
+    ap.add_argument("--crop-size", type=int, default=96,
+                    help="side of random training crops (eval is full-grid)")
+    ap.add_argument("--modality-dropout", type=float, default=0.15,
+                    help="per-batch source-group dropout probability")
     args = ap.parse_args()
 
     if args.cache and os.path.exists(args.cache):
@@ -412,7 +659,9 @@ def main():
         stack, epochs=args.epochs, lr=args.lr, base_width=args.base_width,
         embed_dim=args.embed_dim, holdout_frac=args.holdout_frac,
         seed=args.seed, device=args.device,
-        checkpoint_dir=args.checkpoint_dir, patience=args.patience)
+        checkpoint_dir=args.checkpoint_dir, patience=args.patience,
+        batch_size=args.batch_size, crop_size=args.crop_size,
+        modality_dropout=args.modality_dropout)
     print(f"Best checkpoint: {result['ckpt']}")
     if result["best"] is not None:
         print(f"Best val metrics: {result['best']}")

@@ -10,9 +10,11 @@ Everything here is deliberately conservative about leakage:
     strictly out-of-fold: a test row is only ever interpolated from that
     fold's TRAIN sensors on the SAME day.
   * EPA AQS FRM/FEM data is EXTERNAL VALIDATION ONLY. external_aqs_validation
-    builds the model's feature vector at AQS site-days from PurpleAir sensors
-    and gridded products alone — AQS concentrations never appear in any model
-    input; they are only the ground truth predictions are scored against.
+    builds the model's feature vector at AQS site-days with
+    features.build_site_features — PurpleAir sensors and gridded products
+    alone, with neighbor aggregates over the corrected-target pool (training
+    units) — AQS concentrations never appear in any model input; they are
+    only the ground truth predictions are scored against.
 
 Folds are lists of (train_idx, test_idx) POSITIONAL index arrays into the
 training frame's row order, shared with models_tabular.py and fusion.py.
@@ -37,24 +39,14 @@ for _p in (_AQNET_DIR, _DEEP_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 if _PIPELINE_DIR not in sys.path:
-    sys.path.append(_PIPELINE_DIR)  # appended last; only used for neighbor_features
+    sys.path.append(_PIPELINE_DIR)  # appended last; features.py resolves
+    # pipeline/neighbor_features through it when imported lazily from here
 
 import config
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
 EARTH_R_KM = 6371.0
-
-# Texas coast reference points (Brownsville → Sabine Pass) — copied verbatim
-# from pipeline/03_train_enhanced.py so dist_to_coast at virtual (AQS) sites is
-# byte-identical to the training-side definition.
-TX_COAST_POINTS = [
-    (25.97, -97.50),  # Brownsville
-    (27.80, -97.40),  # Corpus Christi
-    (28.93, -95.97),  # Freeport
-    (29.30, -94.79),  # Galveston
-    (29.70, -93.90),  # Sabine Pass
-]
 
 # EPA 2024 daily PM2.5 AQI breakpoints (µg/m³, 24-hour average, concentrations
 # truncated to 0.1 µg/m³ before categorization). Source: EPA AQI Technical
@@ -71,16 +63,6 @@ AQI_CATEGORIES = ["Good", "Moderate", "USG", "Unhealthy",
                   "Very Unhealthy", "Hazardous"]
 EXCEEDANCE_THRESHOLD = 35.4  # > 35.4 µg/m³ = USG or worse
 
-# PurpleAir met columns interpolated to virtual sites (mirrors the scattered-
-# met IDW convention in research/deeplearning/dataset.py).
-MET_COLS = ["temperature", "humidity", "pressure", "wind_speed", "precipitation"]
-
-# Physical EJScreen source-proximity columns joined at virtual sites. The
-# demographic EJScreen columns (config.EXCLUDED_DEMOGRAPHIC) are never pulled
-# out of tract_lookup here — they must not exist anywhere in a feature frame.
-EJ_PHYSICAL_COLS = ["traffic_proximity", "superfund_proximity",
-                    "rmp_proximity", "diesel_pm_proximity"]
-
 
 # ── Small shared helpers ────────────────────────────────────────────────────
 
@@ -95,24 +77,6 @@ def _latlon(df):
 def _norm_days(df):
     """Normalized (midnight) datetime64 array for the frame's date column."""
     return pd.to_datetime(df["date"]).dt.normalize().to_numpy()
-
-
-def _haversine_km(lat1, lon1, lat2, lon2):
-    """Great-circle distance in km. Inputs may be scalars or numpy arrays.
-    (Same formula as pipeline/03_train_enhanced.py.)"""
-    lat1, lon1, lat2, lon2 = map(np.radians, (lat1, lon1, lat2, lon2))
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    return 2.0 * EARTH_R_KM * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-
-
-def _min_dist_to_points(lats, lons, points):
-    """For each (lat, lon), min haversine km to any reference point."""
-    out = np.full(len(lats), np.inf)
-    for (plat, plon) in points:
-        out = np.minimum(out, _haversine_km(lats, lons, plat, plon))
-    return out
 
 
 def _group_positions(keys, positions):
@@ -145,34 +109,6 @@ def _idw_predict(p_coords_rad, p_vals, q_coords_rad, k=8, power=2.0):
     w = 1.0 / np.maximum(d_km, 1e-3) ** power
     vals = np.asarray(p_vals, dtype=np.float64)[ind]
     return (w * vals).sum(axis=1) / w.sum(axis=1)
-
-
-def _idw_same_day(q_lat, q_lon, q_day, pool_df, value_col, k=8, power=2.0):
-    """Same-day haversine IDW from scattered pool rows to query points.
-
-    NaN pool values are dropped; queries on days with no finite pool reading
-    stay NaN. k=1 degenerates to a nearest-point join (used for the 0.5°
-    by-cell products and the ordinal smoke tiers, where averaging would blur).
-    """
-    out = np.full(len(q_lat), np.nan)
-    p_lat, p_lon = _latlon(pool_df)
-    p_val = pool_df[value_col].to_numpy(dtype=np.float64)
-    p_day = _norm_days(pool_df)
-    ok = np.isfinite(p_val)
-    if not ok.any():
-        return out
-    p_pos_all = np.arange(len(p_val))[ok]
-    p_by_day = _group_positions(p_day[ok], p_pos_all)
-    q_coords = np.radians(np.column_stack([q_lat, q_lon]))
-    p_coords = np.radians(np.column_stack([p_lat, p_lon]))
-    q_by_day = _group_positions(q_day, np.arange(len(q_lat)))
-    for d, q_pos in q_by_day.items():
-        p_pos = p_by_day.get(d)
-        if p_pos is None or len(p_pos) == 0:
-            continue
-        out[q_pos] = _idw_predict(p_coords[p_pos], p_val[p_pos],
-                                  q_coords[q_pos], k=k, power=power)
-    return out
 
 
 # ── Fold constructors ───────────────────────────────────────────────────────
@@ -271,8 +207,14 @@ def metrics(y_true, y_pred):
     }
 
 
-def bootstrap_ci(y_true, y_pred, n_boot=1000, seed=0):
+def bootstrap_ci(y_true, y_pred, n_boot=1000, seed=0, cluster=None):
     """Percentile-bootstrap 95% CIs for R² and RMSE via paired resampling.
+
+    cluster : optional array of per-row cluster labels (sensor ids). When
+    given, unique clusters are resampled with replacement and every row of a
+    drawn cluster enters the replicate (cluster bootstrap) — the honest CI
+    when rows within a sensor are correlated, which sensor-day panels always
+    are. Default None keeps the iid row bootstrap.
 
     Returns {"r2": (lo, hi), "rmse": (lo, hi)}. NaN pairs are dropped first;
     degenerate resamples (zero variance) contribute NaN and are ignored by
@@ -287,10 +229,23 @@ def bootstrap_ci(y_true, y_pred, n_boot=1000, seed=0):
     if n < 2:
         return {"r2": nan_pair, "rmse": nan_pair}
     rng = np.random.default_rng(seed)
+
+    cluster_rows = None
+    if cluster is not None:
+        cl = np.asarray(cluster)[ok]
+        cluster_rows = list(
+            pd.Series(np.arange(n)).groupby(pd.Series(cl)).indices.values())
+        if len(cluster_rows) < 2:
+            cluster_rows = None  # one cluster: fall back to iid rows
+
     r2s = np.full(n_boot, np.nan)
     rmses = np.full(n_boot, np.nan)
     for b in range(n_boot):
-        idx = rng.integers(0, n, n)
+        if cluster_rows is not None:
+            picks = rng.integers(0, len(cluster_rows), len(cluster_rows))
+            idx = np.concatenate([cluster_rows[i] for i in picks])
+        else:
+            idx = rng.integers(0, n, n)
         t, p = yt[idx], yp[idx]
         err = p - t
         rmses[b] = np.sqrt(np.mean(err ** 2))
@@ -341,6 +296,46 @@ def morans_i(residuals, lat, lon, k=8):
     nbrs = np.take_along_axis(ind, take, axis=1)
     lag = z[nbrs].mean(axis=1)
     return float(np.sum(z * lag) / denom)
+
+
+def morans_i_daily(residuals, lat, lon, day_ids, k=8, min_sensors=15):
+    """Per-day Moran's I of residuals, summarized across days.
+
+    morans_i is only meaningful within a single day (pooling days stacks many
+    rows on identical coordinates and degenerates the k-NN graph); this
+    wrapper applies it day by day. Days with fewer than min_sensors rows with
+    finite residuals are skipped — tiny days make the statistic wildly noisy.
+
+    residuals/lat/lon/day_ids: aligned per-row arrays (day_ids is any
+    hashable day key, e.g. normalized datetime64).
+
+    Returns {"mean", "median", "iqr", "n_days"} over the per-day I values
+    (iqr = 75th - 25th percentile); all NaN with n_days=0 when no day
+    qualifies.
+    """
+    r = np.asarray(residuals, dtype=np.float64)
+    la = np.asarray(lat, dtype=np.float64)
+    lo = np.asarray(lon, dtype=np.float64)
+    days = np.asarray(day_ids)
+    ok = np.isfinite(r) & np.isfinite(la) & np.isfinite(lo)
+
+    vals = []
+    by_day = pd.Series(np.arange(len(r))).groupby(pd.Series(days)).indices
+    for d, pos in by_day.items():
+        pos = np.asarray(pos)
+        pos = pos[ok[pos]]
+        if len(pos) < min_sensors:
+            continue
+        i_d = morans_i(r[pos], la[pos], lo[pos], k=k)
+        if np.isfinite(i_d):
+            vals.append(i_d)
+    if not vals:
+        return {"mean": float("nan"), "median": float("nan"),
+                "iqr": float("nan"), "n_days": 0}
+    v = np.asarray(vals, dtype=np.float64)
+    q25, q75 = np.percentile(v, [25.0, 75.0])
+    return {"mean": float(v.mean()), "median": float(np.median(v)),
+            "iqr": float(q75 - q25), "n_days": int(len(v))}
 
 
 def aqi_category(pm25):
@@ -400,6 +395,69 @@ def aqi_category_metrics(y_true, y_pred):
     }
 
 
+def strata_metrics(y, pred, smoke_flag, dust_vals):
+    """Metrics stratified by aerosol regime: smoke / dust / clean.
+
+    smoke_flag : per-row HMS smoke tier (rows with flag > 0 are "smoke";
+                 NaN counts as no smoke).
+    dust_vals  : per-row dust proxy (CAMS dust or merra2_dust25); "dust" rows
+                 exceed the 75th percentile of the finite dust values. When
+                 no finite dust value exists the dust stratum is empty.
+    "clean" is everything that is neither smoke nor dust (smoke and dust may
+    overlap — they are diagnostic strata, not a partition of blame).
+
+    Returns {"smoke": metrics(...), "dust": metrics(...), "clean": ...} —
+    the strata where satellite-driven components should earn their keep.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    pred = np.asarray(pred, dtype=np.float64)
+    smoke = np.nan_to_num(np.asarray(smoke_flag, dtype=np.float64), nan=0.0) > 0
+    dust_vals = np.asarray(dust_vals, dtype=np.float64)
+    finite_dust = dust_vals[np.isfinite(dust_vals)]
+    if len(finite_dust):
+        thr = float(np.percentile(finite_dust, 75.0))
+        dust = np.isfinite(dust_vals) & (dust_vals > thr)
+    else:
+        dust = np.zeros(len(y), dtype=bool)
+    clean = ~smoke & ~dust
+    return {"smoke": metrics(y[smoke], pred[smoke]),
+            "dust": metrics(y[dust], pred[dust]),
+            "clean": metrics(y[clean], pred[clean])}
+
+
+def spatial_temporal_r2(y, pred, sensor_ids):
+    """Decompose skill into between-sensor and within-sensor components.
+
+    spatial_r2:  R² of per-sensor mean(pred) against per-sensor mean(y) —
+                 does the model rank LOCATIONS correctly (the exposure-
+                 assessment question)?
+    temporal_r2: R² of the anomalies (y - site mean) vs (pred - pred site
+                 mean), pooled over rows — does the model track day-to-day
+                 VARIATION at a site once its level is removed?
+
+    A model can score a high pooled R² almost entirely on spatial contrast;
+    this decomposition makes that visible. NaN pairs are dropped first.
+    Returns {"spatial_r2", "temporal_r2", "n_sensors", "n"}.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    pred = np.asarray(pred, dtype=np.float64)
+    sid = np.asarray(sensor_ids)
+    ok = np.isfinite(y) & np.isfinite(pred)
+    if not ok.any():
+        return {"spatial_r2": float("nan"), "temporal_r2": float("nan"),
+                "n_sensors": 0, "n": 0}
+    d = pd.DataFrame({"sid": sid[ok], "y": y[ok], "pred": pred[ok]})
+    site = d.groupby("sid")[["y", "pred"]].mean()
+    d = d.join(site, on="sid", rsuffix="_site")
+    return {
+        "spatial_r2": metrics(site["y"], site["pred"])["r2"],
+        "temporal_r2": metrics(d["y"] - d["y_site"],
+                               d["pred"] - d["pred_site"])["r2"],
+        "n_sensors": int(len(site)),
+        "n": int(len(d)),
+    }
+
+
 # ── Out-of-fold spatial baselines ───────────────────────────────────────────
 # These answer "does the model beat plain geostatistics?" — every test row is
 # interpolated from the SAME DAY's train-fold sensors only, so the baselines
@@ -437,31 +495,75 @@ def baseline_idw(df, folds, k=8):
     return _baseline_interp(df, folds, k=k)
 
 
+def _import_ordinary_kriging():
+    """pykrige's OrdinaryKriging class, or None when pykrige is absent."""
+    try:
+        from pykrige.ok import OrdinaryKriging
+        return OrdinaryKriging
+    except ImportError:
+        return None
+
+
+def _krige_or_idw(p_lat, p_lon, p_vals, q_lat, q_lon, ok_cls):
+    """One day's ordinary-kriging solve with IDW(k=8) fallback.
+
+    The shared engine behind baseline_kriging and krige_to_sites. Kriging
+    (exponential variogram, geographic coordinates) is attempted only when
+    pykrige is importable (ok_cls not None), >= 5 train points exist, and the
+    field is not near-constant; masked/non-finite kriging output or any
+    numerical failure inside the variogram fit / solve falls back to IDW.
+    No clipping here — callers clip when the field is non-negative (PM2.5
+    yes, residuals no). Returns (pred, used_kriging).
+    """
+    p_lat = np.asarray(p_lat, dtype=np.float64)
+    p_lon = np.asarray(p_lon, dtype=np.float64)
+    p_vals = np.asarray(p_vals, dtype=np.float64)
+    q_lat = np.asarray(q_lat, dtype=np.float64)
+    q_lon = np.asarray(q_lon, dtype=np.float64)
+    if (ok_cls is not None and len(p_vals) >= 5
+            and float(np.ptp(p_vals)) > 1e-9):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ok_model = ok_cls(
+                    p_lon, p_lat, p_vals,
+                    variogram_model="exponential",
+                    coordinates_type="geographic",
+                    enable_plotting=False, verbose=False)
+                z, _ = ok_model.execute("points", q_lon, q_lat)
+            z = np.asarray(np.ma.filled(z, np.nan), dtype=np.float64)
+            if np.all(np.isfinite(z)):
+                return z, True
+        except Exception:
+            pass
+    pred = _idw_predict(np.radians(np.column_stack([p_lat, p_lon])), p_vals,
+                        np.radians(np.column_stack([q_lat, q_lon])),
+                        k=8, power=2.0)
+    return pred, False
+
+
 def baseline_kriging(df, folds, max_train_per_day=150):
     """Per-day ordinary kriging of train-fold values, evaluated at test rows.
 
     pykrige OrdinaryKriging with an exponential variogram on geographic
-    coordinates. Train points are subsampled to max_train_per_day (kriging
-    solves a dense system per day) with a fixed rng for reproducibility. Any
-    per-day failure — singular variogram, near-constant field, too few points,
-    or pykrige missing entirely — falls back to IDW (k=8) for that day.
-    Predictions are clipped at 0: kriging happily extrapolates below zero,
-    PM2.5 cannot.
+    coordinates (via the shared _krige_or_idw engine). Train points are
+    subsampled to max_train_per_day (kriging solves a dense system per day)
+    with a fixed rng for reproducibility. Any per-day failure — singular
+    variogram, near-constant field, too few points, or pykrige missing
+    entirely — falls back to IDW (k=8) for that day. Predictions are clipped
+    at 0: kriging happily extrapolates below zero, PM2.5 cannot.
     """
-    try:
-        from pykrige.ok import OrdinaryKriging
-    except ImportError:
-        OrdinaryKriging = None
+    ok_cls = _import_ordinary_kriging()
+    if ok_cls is None:
         print("[baseline_kriging] pykrige not installed — every day falls back "
               "to IDW(k=8). pip install pykrige for the true kriging baseline.")
 
     lat, lon = _latlon(df)
-    coords = np.radians(np.column_stack([lat, lon]))
     y = df["target"].to_numpy(dtype=np.float64)
     day = _norm_days(df)
     oof = np.full(len(df), np.nan)
     rng = np.random.default_rng(0)
-    n_fail, n_days = 0, 0
+    n_fall, n_days = 0, 0
     for tr, te in folds:
         tr = np.asarray(tr)
         te = np.asarray(te)
@@ -475,207 +577,80 @@ def baseline_kriging(df, folds, max_train_per_day=150):
             n_days += 1
             if len(p_pos) > max_train_per_day:
                 p_pos = rng.choice(p_pos, size=max_train_per_day, replace=False)
-            pred = None
-            if (OrdinaryKriging is not None and len(p_pos) >= 5
-                    and float(np.ptp(y[p_pos])) > 1e-9):
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        ok_model = OrdinaryKriging(
-                            lon[p_pos], lat[p_pos], y[p_pos],
-                            variogram_model="exponential",
-                            coordinates_type="geographic",
-                            enable_plotting=False, verbose=False)
-                        z, _ = ok_model.execute("points", lon[q_pos], lat[q_pos])
-                    pred = np.asarray(np.ma.filled(z, np.nan), dtype=np.float64)
-                except Exception:
-                    n_fail += 1
-                    pred = None
-            if pred is None:
-                pred = _idw_predict(coords[p_pos], y[p_pos], coords[q_pos],
-                                    k=8, power=2.0)
+            pred, used_kriging = _krige_or_idw(lat[p_pos], lon[p_pos], y[p_pos],
+                                               lat[q_pos], lon[q_pos], ok_cls)
+            if not used_kriging and ok_cls is not None:
+                n_fall += 1
             oof[q_pos] = np.maximum(pred, 0.0)
-    if n_fail:
-        print(f"[baseline_kriging] {n_fail}/{n_days} fold-days fell back to IDW")
+    if n_fall:
+        print(f"[baseline_kriging] {n_fall}/{n_days} fold-days fell back to IDW")
     return oof
 
 
-def baseline_column(df, col):
+def krige_to_sites(train_lat, train_lon, train_vals, site_lat, site_lon,
+                   max_train=150):
+    """Single-day ordinary kriging of scattered values to arbitrary sites.
+
+    The per-day engine behind baseline_kriging exposed standalone, for the
+    pipeline's deployment-mode Tier-3-at-AQS assembly: per day, krige the
+    full-data training residuals to the AQS site coordinates. pykrige
+    ordinary kriging (exponential variogram, geographic coordinates) with
+    IDW(k=8) fallback on any failure; train points with non-finite
+    coordinates/values are dropped, the rest subsampled to max_train with a
+    fixed rng. Output is NOT clipped at zero — residual fields are
+    legitimately negative. Returns all-NaN when no usable train point exists.
+    """
+    t_lat = np.asarray(train_lat, dtype=np.float64)
+    t_lon = np.asarray(train_lon, dtype=np.float64)
+    t_val = np.asarray(train_vals, dtype=np.float64)
+    s_lat = np.asarray(site_lat, dtype=np.float64)
+    s_lon = np.asarray(site_lon, dtype=np.float64)
+    ok = np.isfinite(t_val) & np.isfinite(t_lat) & np.isfinite(t_lon)
+    if not ok.any():
+        return np.full(len(s_lat), np.nan)
+    t_lat, t_lon, t_val = t_lat[ok], t_lon[ok], t_val[ok]
+    if len(t_val) > max_train:
+        keep = np.random.default_rng(0).choice(len(t_val), size=max_train,
+                                               replace=False)
+        t_lat, t_lon, t_val = t_lat[keep], t_lon[keep], t_val[keep]
+    pred, _ = _krige_or_idw(t_lat, t_lon, t_val, s_lat, s_lon,
+                            _import_ordinary_kriging())
+    return pred
+
+
+def baseline_column(df, col, offset=0.0):
     """A raw prior column (e.g. cams_pm25 or geoscf_pm25) used directly as the
     prediction — the "is the ML model beating the CTM?" baseline. Needs no
-    folds because the column was never fit to the target."""
+    folds because the column was never fit to the target.
+
+    offset optionally mean-debiases the prior before scoring: the caller
+    computes offset = mean(prior - target) on TRAIN rows only and the column
+    is scored as (col - offset) — the "one free constant" variant that
+    separates a prior's spatial-pattern skill from its calibration bias.
+    Default 0.0 keeps the raw prior.
+    """
     if col not in df.columns:
         print(f"[baseline_column] '{col}' not in frame — returning all-NaN")
         return np.full(len(df), np.nan)
-    return df[col].to_numpy(dtype=np.float64)
+    return df[col].to_numpy(dtype=np.float64) - float(offset)
 
 
 # ── EPA AQS external validation ─────────────────────────────────────────────
 
-def build_aqs_feature_frame(aqs_parquet, geoscf_parquet=None, merra2_parquet=None):
-    """Assemble the model's feature vector at EPA AQS site-days.
-
-    Each AQS FRM/FEM monitor is treated as a VIRTUAL location: every feature
-    is rebuilt the way the training frame builds it, from PurpleAir sensors
-    and gridded products only. AQS concentrations are never used as inputs —
-    pm25_aqs rides along solely as the ground-truth column (methodology rule:
-    AQS is external validation only, never training or feature input).
-
-    Feature sources at a virtual point:
-      met (temperature/humidity/pressure/wind_speed/precipitation)
-                    same-day IDW (k=8) from PurpleAir sensor readings,
-                    mirroring the gridded stack's scattered-met interpolation
-      hms_smoke     same-day tier of the nearest PurpleAir sensor (0 = none),
-                    mirroring the nearest-sensor smoke gridding
-      aod/cams_pm25 same-day nearest 0.5° CAMS cell
-      EJ physical proximity
-                    nearest census-tract centroid, PHYSICAL source-proximity
-                    columns only (demographic columns never enter the frame)
-      dist_to_nearest_sensor
-                    haversine km to the nearest PurpleAir sensor site
-      dist_to_coast min distance to the training-side TX_COAST_POINTS
-      neighbor features
-                    pipeline/neighbor_features.compute_neighbor_features_df
-                    with query=AQS site-days and pool=PurpleAir sensor-days
-                    (raw pm25 pool, same-day, and trivially leave-self-out:
-                    AQS sites are not in the pool and never contribute values)
-      temporal + interactions
-                    same formulas as pipeline/03_train_enhanced.py load_data()
-      GEOS-CF / MERRA-2
-                    features.attach_external (NaN where a parquet is absent)
-
-    AQS site-days outside the PurpleAir date coverage are dropped (no same-day
-    context exists for them). Features that cannot be computed stay NaN — the
-    tree models handle missing values natively.
-    """
-    import features
-    from neighbor_features import compute_neighbor_features_df
-
-    aqs = pd.read_parquet(aqs_parquet)
-    aqs["date"] = pd.to_datetime(aqs["date"]).dt.normalize()
-    aqs = aqs.dropna(subset=["pm25_aqs", "lat", "lon"]).reset_index(drop=True)
-
-    pa = features.load_sensor_days().copy()
-    pa["date"] = pd.to_datetime(pa["date"]).dt.normalize()
-
-    in_range = aqs["date"].isin(pd.unique(pa["date"]))
-    n_drop = int((~in_range).sum())
-    if n_drop:
-        print(f"[aqs] dropping {n_drop:,} AQS site-days outside PurpleAir date coverage")
-    aqs = aqs[in_range].reset_index(drop=True)
-    print(f"[aqs] building features at {len(aqs):,} site-days "
-          f"({aqs['site_id'].nunique()} monitors)")
-
-    X = aqs[["site_id", "date", "lat", "lon", "pm25_aqs"]].copy()
-    X["latitude"] = X["lat"].astype(np.float64)
-    X["longitude"] = X["lon"].astype(np.float64)
-    q_lat = X["lat"].to_numpy(dtype=np.float64)
-    q_lon = X["lon"].to_numpy(dtype=np.float64)
-    q_day = X["date"].to_numpy()
-
-    # Meteorology: same-day IDW from PurpleAir sensor readings.
-    for col in MET_COLS:
-        if col in pa.columns:
-            X[col] = _idw_same_day(q_lat, q_lon, q_day, pa, col, k=8)
-        else:
-            X[col] = np.nan
-
-    # HMS smoke: nearest sensor's same-day tier; absence means 0 (no smoke).
-    if "hms_smoke" in pa.columns:
-        pa["_hms_filled"] = pa["hms_smoke"].astype(np.float64).fillna(0.0)
-        X["hms_smoke"] = pd.Series(
-            _idw_same_day(q_lat, q_lon, q_day, pa, "_hms_filled", k=1)).fillna(0.0).to_numpy()
-        pa.drop(columns=["_hms_filled"], inplace=True)
-    else:
-        X["hms_smoke"] = 0.0
-
-    # CAMS aerosol: nearest 0.5° cell, same day (archive starts 2022-08 —
-    # earlier rows stay NaN, exactly as in the training frame).
-    aq_path = os.path.join(config.ROOT, "pipeline", "airquality_by_cell.parquet")
-    if os.path.exists(aq_path):
-        aq = pd.read_parquet(aq_path, columns=["cell_lat", "cell_lon", "date",
-                                               "aod", "cams_pm25"])
-        aq = aq.rename(columns={"cell_lat": "lat", "cell_lon": "lon"})
-        aq["date"] = pd.to_datetime(aq["date"]).dt.normalize()
-        for col in ("aod", "cams_pm25"):
-            X[col] = _idw_same_day(q_lat, q_lon, q_day, aq, col, k=1)
-    else:
-        X["aod"] = np.nan
-        X["cams_pm25"] = np.nan
-
-    # EJ physical source proximity: nearest tract centroid. ONLY the physical
-    # columns are read — the demographic EJScreen columns never touch X.
-    from sklearn.neighbors import BallTree
-    tract_path = os.path.join(config.ROOT, "backend", "static", "tract_lookup.parquet")
-    tl = pd.read_parquet(tract_path, columns=["lat", "lon"] + EJ_PHYSICAL_COLS)
-    ttree = BallTree(np.radians(tl[["lat", "lon"]].to_numpy(dtype=np.float64)),
-                     metric="haversine")
-    _, tind = ttree.query(np.radians(np.column_stack([q_lat, q_lon])), k=1)
-    for col in EJ_PHYSICAL_COLS:
-        X[col] = tl[col].to_numpy(dtype=np.float64)[tind[:, 0]]
-
-    # Spatial context: distance to the nearest PurpleAir site (the virtual-
-    # point analog of training's nearest-OTHER-sensor) and distance to coast.
-    pa_lat, pa_lon = _latlon(pa.drop_duplicates("sensor_id"))
-    stree = BallTree(np.radians(np.column_stack([pa_lat, pa_lon])), metric="haversine")
-    sdist, _ = stree.query(np.radians(np.column_stack([q_lat, q_lon])), k=1)
-    X["dist_to_nearest_sensor"] = sdist[:, 0] * EARTH_R_KM
-    X["dist_to_coast"] = _min_dist_to_points(q_lat, q_lon, TX_COAST_POINTS)
-
-    # Temporal encodings + interactions (formulas mirror pipeline/03).
-    d = pd.to_datetime(X["date"])
-    X["month"] = d.dt.month
-    X["dow"] = d.dt.dayofweek
-    X["day_of_year"] = d.dt.dayofyear
-    X["month_sin"] = np.sin(2 * np.pi * X["month"] / 12)
-    X["month_cos"] = np.cos(2 * np.pi * X["month"] / 12)
-    X["dow_sin"] = np.sin(2 * np.pi * X["dow"] / 7)
-    X["dow_cos"] = np.cos(2 * np.pi * X["dow"] / 7)
-    X["doy_sin"] = np.sin(2 * np.pi * X["day_of_year"] / 365)
-    X["doy_cos"] = np.cos(2 * np.pi * X["day_of_year"] / 365)
-    X["temp_x_humidity"] = X["temperature"] * X["humidity"] / 100.0
-    X["wind_x_temp"] = X["wind_speed"] * X["temperature"] / 100.0
-
-    # Neighbor features: production single source of truth, query=AQS points,
-    # pool=PurpleAir sensor-days (raw pm25 — the same column the training-side
-    # add_neighbor_features consumes). The query pm25 is NaN, so the pool-side
-    # leave-one-out fallback resolves to the pool grand mean — correct, since
-    # an AQS site has no reading of its own to subtract.
-    q_nbr = pd.DataFrame({
-        "latitude": q_lat,
-        "longitude": q_lon,
-        "date": X["date"].to_numpy(),
-        "sensor_id": ("aqs_" + X["site_id"].astype(str)).to_numpy(),
-        "pm25": np.nan,
-    })
-    pa_pool_lat, pa_pool_lon = _latlon(pa)
-    pool = pd.DataFrame({
-        "latitude": pa_pool_lat,
-        "longitude": pa_pool_lon,
-        "date": pa["date"].to_numpy(),
-        "sensor_id": pa["sensor_id"].astype(str).to_numpy(),
-        "pm25": pa["pm25"].to_numpy(dtype=np.float64),
-    })
-    pool = pool[np.isfinite(pool["pm25"])].reset_index(drop=True)
-    nbr = compute_neighbor_features_df(q_nbr, pool, target_col="pm25")
-    for col, arr in nbr.items():
-        X[col] = arr
-
-    # External CTM / reanalysis features (NaN wherever a parquet is absent).
-    X = features.attach_external(X, geoscf_parquet=geoscf_parquet,
-                                 merra2_parquet=merra2_parquet)
-
-    missing = [c for c in config.PHYSICAL_FEATURES if c not in X.columns]
-    if missing:
-        print(f"[aqs] features unavailable at AQS sites (left as NaN): {missing}")
-        for c in missing:
-            X[c] = np.nan
-    return X
-
-
 def external_aqs_validation(predict_fn, aqs_parquet, geoscf_parquet=None,
-                            merra2_parquet=None):
+                            merra2_parquet=None, correction="barkjohn"):
     """Score a fitted AQNet predictor against EPA AQS FRM/FEM daily PM2.5.
+
+    Feature assembly is delegated to features.build_site_features — the one
+    site-day feature builder shared with the training side. Each AQS FRM/FEM
+    monitor is treated as a VIRTUAL location: every feature comes from
+    PurpleAir sensors, gridded products, and tract data alone, and the
+    neighbor aggregates pool CORRECTED-target sensor-days (the same units the
+    model was trained on). AQS concentrations never appear in any model
+    input — pm25_aqs rides along solely as the ground-truth column
+    (methodology rule: AQS is external validation only, never training or
+    feature input). AQS site-days outside the PurpleAir date coverage are
+    dropped (no same-day context exists for them).
 
     Parameters
     ----------
@@ -689,17 +664,39 @@ def external_aqs_validation(predict_fn, aqs_parquet, geoscf_parquet=None,
     geoscf_parquet, merra2_parquet : str or None
         Pass the SAME parquets the model was trained with so the AQS feature
         vector carries the same external columns.
+    correction : str
+        Target-correction method the model was trained with, forwarded to
+        build_site_features so the neighbor pool aggregates matching units.
 
-    Returns a dict: pooled regression metrics (+ bootstrap CIs), EPA-2024 AQI
-    category metrics, per-year breakdown, and site/row counts. Because AQS
+    Returns a dict: pooled regression metrics (+ cluster-bootstrap CIs over
+    monitors), EPA-2024 AQI category metrics, per-year breakdown, site/row
+    counts, and "feature_builder" recording the assembly path. Because AQS
     monitors are FRM/FEM reference instruments never seen in training, this
     is a genuinely external accuracy estimate for the corrected-PurpleAir
     target scale.
     """
     import features
 
-    X = build_aqs_feature_frame(aqs_parquet, geoscf_parquet=geoscf_parquet,
-                                merra2_parquet=merra2_parquet)
+    aqs = pd.read_parquet(aqs_parquet)
+    aqs["date"] = pd.to_datetime(aqs["date"]).dt.normalize()
+    aqs = aqs.dropna(subset=["pm25_aqs", "lat", "lon"]).reset_index(drop=True)
+
+    # Corrected PurpleAir pool, built once: it defines the date coverage AND
+    # feeds build_site_features so neighbor aggregates are in target units.
+    pool = features.apply_target_correction(features.load_sensor_days(),
+                                            method=correction)
+    in_range = aqs["date"].isin(pd.unique(pool["date"]))
+    n_drop = int((~in_range).sum())
+    if n_drop:
+        print(f"[aqs] dropping {n_drop:,} AQS site-days outside PurpleAir date coverage")
+    aqs = aqs[in_range].reset_index(drop=True)
+    print(f"[aqs] building features at {len(aqs):,} site-days "
+          f"({aqs['site_id'].nunique()} monitors) via features.build_site_features")
+
+    X = features.build_site_features(
+        aqs[["site_id", "date", "lat", "lon", "pm25_aqs"]],
+        correction=correction, geoscf_parquet=geoscf_parquet,
+        merra2_parquet=merra2_parquet, pool=pool)
     cols = features.feature_columns(X)
     y_true = X["pm25_aqs"].to_numpy(dtype=np.float64)
     y_pred = np.asarray(predict_fn(X[cols]), dtype=np.float64).ravel()
@@ -708,9 +705,11 @@ def external_aqs_validation(predict_fn, aqs_parquet, geoscf_parquet=None,
                          f"for {len(X)} AQS site-days")
 
     out = metrics(y_true, y_pred)
+    out["feature_builder"] = "features.build_site_features"
     out["n_sites"] = int(X["site_id"].nunique())
     out["n_pred_nan"] = int(np.sum(~np.isfinite(y_pred)))
-    out["bootstrap_ci"] = bootstrap_ci(y_true, y_pred)
+    out["bootstrap_ci"] = bootstrap_ci(y_true, y_pred,
+                                       cluster=X["site_id"].to_numpy())
     out["aqi"] = aqi_category_metrics(y_true, y_pred)
 
     by_year = {}

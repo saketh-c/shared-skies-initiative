@@ -12,8 +12,19 @@ Mirrors the production ensemble methodology (pipeline/03_train_enhanced.py):
   - Blending uses the simplex-constrained convex combiner (weights >= 0,
     sum to 1; scipy SLSQP minimizing MSE) fit ONLY on out-of-fold
     predictions — the same Super-Learner-style combiner production uses.
+    Two blends are returned: pooled weights over all OOF rows (used by
+    fit_full for deployment) and a leave-one-fold-out blend whose weights
+    for fold f are fit on the OTHER folds' OOF rows only ("oof_lofo" — the
+    headline OOF, since fold f's rows never influence their own weights).
   - Quantile heads (LightGBM objective="quantile") produce out-of-fold
     quantile predictions for the Tier-3 split-conformal calibration.
+  - Per-fold column overrides (fold_col_overrides) let the pipeline swap in
+    leakage-free neighbor features recomputed per fold from the training
+    pool only (features.neighbor_features_per_fold) — applied on a per-fold
+    copy of the feature matrix, never mutating the caller's frame.
+  - When a CUDA device is detectable (guarded torch probe, or AQNET_GPU=1),
+    XGBoost trains with device="cuda" and CatBoost with task_type="GPU";
+    LightGBM and RandomForest stay on CPU.
 
 Defaults are strong offline-research settings (no serving memory budget
 here, unlike the deployed bundle). Colab users can override any
@@ -83,10 +94,43 @@ EARLY_STOPPING_ROUNDS = 100
 SEED = 42
 
 
+# ── GPU detection (guarded torch probe, AQNET_GPU=1 as explicit override) ──
+def _gpu_reason():
+    """Reason string when a CUDA device is usable, else None.
+
+    torch is an optional dependency for this module (it ships with the deep
+    tier), so the probe is fully guarded; setting AQNET_GPU=1 in the
+    environment forces GPU mode on torch-free installs. When detected,
+    XGBoost is built with device="cuda" and CatBoost with task_type="GPU" —
+    LightGBM and RandomForest stay on CPU.
+    """
+    if os.environ.get("AQNET_GPU") == "1":
+        return "env AQNET_GPU=1"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            try:
+                name = torch.cuda.get_device_name(0)
+            except Exception:
+                name = "CUDA device"
+            return f"torch.cuda ({name})"
+    except Exception:
+        pass
+    return None
+
+
+GPU_REASON = _gpu_reason()
+HAS_GPU = GPU_REASON is not None
+if HAS_GPU:
+    print(f"[models_tabular] GPU detected via {GPU_REASON} — "
+          f"xgb device='cuda', catboost task_type='GPU'")
+
+
 # ── Model factories (defaults tuned for offline research; override via kwargs) ──
 def _make_lgbm(**overrides):
     params = dict(
         objective="huber",          # robust to PM2.5 event-day spikes
+        alpha=10.0,                 # huber delta (µg/m³): quadratic below, linear above
         n_estimators=2000,          # ceiling; early stopping picks the real count
         learning_rate=0.03,
         num_leaves=127,
@@ -108,6 +152,7 @@ def _make_lgbm(**overrides):
 def _make_xgb(**overrides):
     params = dict(
         objective="reg:pseudohubererror",
+        huber_slope=10.0,           # pseudo-huber delta (µg/m³), matches lgbm alpha
         n_estimators=2000,
         learning_rate=0.03,
         max_depth=7,                # ~2^7 leaves, comparable to lgbm num_leaves=127
@@ -122,6 +167,8 @@ def _make_xgb(**overrides):
         random_state=SEED,
         verbosity=0,
     )
+    if HAS_GPU:
+        params["device"] = "cuda"
     params.update(overrides)
     return _xgb.XGBRegressor(**params)
 
@@ -138,6 +185,8 @@ def _make_catboost(**overrides):
         allow_writing_files=False,
         verbose=False,
     )
+    if HAS_GPU:
+        params["task_type"] = "GPU"
     params.update(overrides)
     return CatBoostRegressor(**params)
 
@@ -147,9 +196,10 @@ def _make_rf(**overrides):
     # larger and deeper than the deployed depth-12 version.
     params = dict(
         n_estimators=500,
-        max_features="sqrt",
+        max_features=0.33,          # a third of features per split — decorrelates
+                                    # trees across the correlated met/CTM block
         max_depth=None,
-        min_samples_leaf=5,
+        min_samples_leaf=10,
         n_jobs=-1,
         random_state=SEED,
     )
@@ -215,6 +265,36 @@ def _impute(X, med):
     if bad.any():
         X[bad] = np.broadcast_to(med, X.shape)[bad]
     return X
+
+
+def _apply_fold_overrides(X, features, fold_col_overrides, fold_i, n):
+    """Return X with fold `fold_i`'s override columns swapped in, on a COPY.
+
+    fold_col_overrides maps fold index -> {column name: full-length array}.
+    Because the arrays are full length, overwriting the whole column applies
+    the override to BOTH the train and test rows of the fold (the contract
+    for leakage-free per-fold neighbor features). When the fold has no
+    overrides the original matrix is returned untouched; the caller's frame
+    and base matrix are never mutated. Columns absent from the feature list
+    are skipped with a note; a wrong-length array raises.
+    """
+    ov = (fold_col_overrides or {}).get(fold_i)
+    if not ov:
+        return X
+    pos = {c: j for j, c in enumerate(features)}
+    Xf = X.copy()
+    for col, arr in ov.items():
+        if col not in pos:
+            print(f"[models_tabular] fold {fold_i}: override column '{col}' "
+                  f"not in feature list — skipped")
+            continue
+        arr = np.asarray(arr, dtype=float)
+        if arr.shape != (n,):
+            raise ValueError(
+                f"fold {fold_i}: override for '{col}' has shape {arr.shape}, "
+                f"expected full-length ({n},)")
+        Xf[:, pos[col]] = arr
+    return Xf
 
 
 def _es_tail_split(n, dates=None):
@@ -324,7 +404,8 @@ def fit_simplex_blend(per_model_oof, y):
 
 
 # ── Cross-validated training (the Tier-1 workhorse) ──
-def train_cv(df, features, folds, target="target", models=None):
+def train_cv(df, features, folds, target="target", models=None,
+             fold_col_overrides=None, return_fitted=True):
     """Train the base-learner ensemble across pre-built CV folds.
 
     df:       training frame (features + target column; NaN features allowed).
@@ -332,12 +413,27 @@ def train_cv(df, features, folds, target="target", models=None):
     folds:    list of (train_idx, test_idx) positional-index arrays
               (validation.make_loso_folds / make_spatial_block_folds).
     models:   None | list of names | dict name -> hyperparameter overrides.
+    fold_col_overrides:
+              optional {fold_index: {column: full-length np.ndarray}}. For
+              that fold the named feature columns are overwritten — train AND
+              test rows — on a per-fold copy of the matrix (the caller's
+              frame is never mutated). Used to inject leakage-free per-fold
+              neighbor features from features.neighbor_features_per_fold.
+    return_fitted:
+              when False, per-fold estimators are dropped as soon as the fold
+              is scored and "fitted" comes back None (validate-stage callers
+              pass False to save RAM).
 
-    Returns {"oof": blended OOF array (NaN where never a test row),
+    Returns {"oof": pooled-weight blended OOF (NaN where never a test row),
+             "oof_lofo": leave-one-fold-out blended OOF — fold f's weights
+                         are fit on the OTHER folds' OOF rows only, so this
+                         is the headline number,
              "per_model_oof": {name: OOF array},
              "weights": {name: simplex weight fit on the pooled OOF},
+             "weights_lofo": [per-fold weight dict, ordered by fold],
              "fold_metrics": per-fold per-model metric dicts,
-             "fitted": last-fold model bundle usable by predict_full}.
+             "fitted": last-fold model bundle usable by predict_full
+                       (None when return_fitted=False)}.
     """
     model_specs = _resolve_models(models)
     names = list(model_specs.keys())
@@ -353,13 +449,17 @@ def train_cv(df, features, folds, target="target", models=None):
 
     print(f"[train_cv] {len(folds)} folds x {names} on {n:,} rows, "
           f"{len(features)} features")
+    if fold_col_overrides:
+        print(f"[train_cv] per-fold column overrides active for "
+              f"{len(fold_col_overrides)} fold(s)")
     for fi, (tr_idx, te_idx) in enumerate(folds):
         tr_idx = np.asarray(tr_idx)
         te_idx = np.asarray(te_idx)
         tr_idx = tr_idx[np.isfinite(y[tr_idx])]  # never fit on NaN targets
+        X_fold = _apply_fold_overrides(X, features, fold_col_overrides, fi, n)
 
-        X_tr, y_tr = X[tr_idx], y[tr_idx]
-        X_te = X[te_idx]
+        X_tr, y_tr = X_fold[tr_idx], y[tr_idx]
+        X_te = X_fold[te_idx]
         d_tr = dates[tr_idx] if dates is not None else None
         head, tail = _es_tail_split(len(tr_idx), d_tr)
         X_head, y_head = X_tr[head], y_tr[head]
@@ -379,7 +479,9 @@ def train_cv(df, features, folds, target="target", models=None):
                 _fit_one(name, est, X_head, y_head, X_es, y_es)
                 pred = est.predict(X_te)
             per_model_oof[name][te_idx] = _clip0(pred)
-            fold_models[name] = est
+            if return_fitted:
+                fold_models[name] = est
+            del est  # scored — drop the local ref immediately (RAM)
 
         te_ok = np.isfinite(y[te_idx])
         fm = {"fold": fi, "n_train": int(len(tr_idx)),
@@ -389,8 +491,9 @@ def train_cv(df, features, folds, target="target", models=None):
                 fm["models"][name] = _metric_row(
                     y[te_idx][te_ok], per_model_oof[name][te_idx][te_ok])
         fold_metrics.append(fm)
-        fitted = {"models": fold_models, "impute_medians": med,
-                  "features": list(features)}
+        if return_fitted:
+            fitted = {"models": fold_models, "impute_medians": med,
+                      "features": list(features)}
         msg = "  ".join(f"{m}:R2={v['r2']:.3f}" for m, v in fm["models"].items())
         print(f"  fold {fi + 1}/{len(folds)}  n_te={fm['n_test']:,}  {msg}")
 
@@ -414,15 +517,50 @@ def train_cv(df, features, folds, target="target", models=None):
               f"MAE={m['mae']:.4f}")
         print("  weights  " + "  ".join(f"{k}:{v:.3f}" for k, v in weights.items()))
 
+    # ── Leave-one-fold-out blend (the headline OOF) ──
+    # Fold f's weights are refit (same simplex SLSQP) on the OOF rows of every
+    # OTHER fold, then applied to fold f's rows — so no row's blend weights
+    # were influenced by that row's own fold.
+    oof_lofo = np.full(n, np.nan)
+    weights_lofo = []
+    for fi, (_tr_idx, te_idx) in enumerate(folds):
+        te_idx = np.asarray(te_idx)
+        other = np.ones(n, dtype=bool)
+        other[te_idx] = False
+        fit_oof = {name: np.where(other, per_model_oof[name], np.nan)
+                   for name in names}
+        w_f = fit_simplex_blend(fit_oof, y)
+        weights_lofo.append(w_f)
+        wv = np.array([w_f[name] for name in names])
+        Pf = P[te_idx]
+        rows_f = np.all(np.isfinite(Pf), axis=1)
+        vals = np.full(len(te_idx), np.nan)
+        vals[rows_f] = _clip0(Pf[rows_f] @ wv)
+        oof_lofo[te_idx] = vals
+
+    ok_l = np.isfinite(oof_lofo) & np.isfinite(y)
+    if ok_l.sum() >= 2:
+        m = _metric_row(y[ok_l], oof_lofo[ok_l])
+        print(f"[train_cv] LOFO blend (headline)  R2={m['r2']:.4f}  "
+              f"RMSE={m['rmse']:.4f}  MAE={m['mae']:.4f}")
+
     if fitted is not None:
         fitted["weights"] = weights
-    return {"oof": oof, "per_model_oof": per_model_oof, "weights": weights,
+    return {"oof": oof, "oof_lofo": oof_lofo, "per_model_oof": per_model_oof,
+            "weights": weights, "weights_lofo": weights_lofo,
             "fold_metrics": fold_metrics, "fitted": fitted}
 
 
 # ── Quantile heads (LightGBM pinball loss) for Tier-3 interval calibration ──
-def train_quantile_cv(df, features, folds, quantiles=(0.05, 0.5, 0.95)):
+def train_quantile_cv(df, features, folds, quantiles=(0.05, 0.5, 0.95),
+                      fold_col_overrides=None):
     """Out-of-fold LightGBM quantile predictions at each requested level.
+
+    fold_col_overrides follows the train_cv contract: optional
+    {fold_index: {column: full-length np.ndarray}} applied to BOTH train and
+    test rows of that fold on a per-fold copy of the matrix (the caller's
+    frame is never mutated), so the quantile heads see the same leakage-free
+    per-fold neighbor features as the point ensemble.
 
     Returns {"oof_q": {q: np.ndarray}} with NaN where a row was never a test
     row. Per-row quantile crossings are repaired by monotone rearrangement
@@ -445,11 +583,15 @@ def train_quantile_cv(df, features, folds, quantiles=(0.05, 0.5, 0.95)):
 
     oof_q = {q: np.full(n, np.nan) for q in qs}
     print(f"[train_quantile_cv] quantiles={qs} over {len(folds)} folds")
+    if fold_col_overrides:
+        print(f"[train_quantile_cv] per-fold column overrides active for "
+              f"{len(fold_col_overrides)} fold(s)")
     for fi, (tr_idx, te_idx) in enumerate(folds):
         tr_idx = np.asarray(tr_idx)
         te_idx = np.asarray(te_idx)
         tr_idx = tr_idx[np.isfinite(y[tr_idx])]
-        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_fold = _apply_fold_overrides(X, features, fold_col_overrides, fi, n)
+        X_tr, y_tr = X_fold[tr_idx], y[tr_idx]
         d_tr = dates[tr_idx] if dates is not None else None
         head, tail = _es_tail_split(len(tr_idx), d_tr)
 
@@ -469,7 +611,7 @@ def train_quantile_cv(df, features, folds, quantiles=(0.05, 0.5, 0.95)):
                                                       verbose=False)])
             else:
                 est.fit(X_tr, y_tr)
-            oof_q[q][te_idx] = _clip0(est.predict(X[te_idx]))
+            oof_q[q][te_idx] = _clip0(est.predict(X_fold[te_idx]))
         print(f"  fold {fi + 1}/{len(folds)} done")
 
     # Monotone rearrangement: enforce q_lo <= ... <= q_hi per row.
@@ -589,6 +731,8 @@ if __name__ == "__main__":
     bundle = fit_full(demo, feats)
     pred = predict_full(bundle, demo[feats])
     print(f"[smoke] blended OOF finite rows: {np.isfinite(out['oof']).sum()}/{n}")
+    print(f"[smoke] LOFO OOF finite rows: {np.isfinite(out['oof_lofo']).sum()}/{n}"
+          f"  ({len(out['weights_lofo'])} per-fold weight sets)")
     print(f"[smoke] q-heads: "
           + ", ".join(f"q{q}: {np.isfinite(a).sum()}" for q, a in qout["oof_q"].items()))
     print(f"[smoke] predict_full range: {pred.min():.2f}–{pred.max():.2f}")
